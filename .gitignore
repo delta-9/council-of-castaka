@@ -1,0 +1,5 @@
+/castaka
+/council-of-castaka
+.DS_Store
+/*.md
+!README.md
