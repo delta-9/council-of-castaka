@@ -1,5 +1,17 @@
 # Council of the Castaka
 
+## ⚠️ Disclaimer
+
+This is an unofficial, fan-made project inspired by *La Caste des Méta-Barons* (The Metabarons).
+
+The Metabarons universe, characters, and related elements are © their respective rights holders (Les Humanoïdes Associés / Humanoids and original authors).
+
+This project is non-commercial and not endorsed by or affiliated with the rights holders.
+
+All original code and text in this repository is released under the MIT license (see LICENSE), excluding underlying Metabarons intellectual property.
+
+---
+
 if you look for La caste des Méta-Barons => `https://www.amazon.com/dp/B07JK2XJT3`
 
 > Dans la galaxie des Dynasties, les Méta-Barons sont les plus puissants. Ils régissent les planètes, les étoiles, les galaxies. Ils sont la force motrice de l'univers.
