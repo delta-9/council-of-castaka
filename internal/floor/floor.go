@@ -56,9 +56,10 @@ func New(log *Log, seats []*Seat, rounds int) *Floor {
 	return f
 }
 
-// Post appends a chair message and grants the council its rounds. A message
-// that names seats with @ runs one round in which only they speak.
-func (f *Floor) Post(text string) error {
+// Post appends a chair message, grants the council its rounds and returns the
+// message as stored. A message that names seats with @ runs one round in which
+// only they speak.
+func (f *Floor) Post(text string) (Entry, error) {
 	only := map[string]bool{}
 	for _, m := range mention.FindAllStringSubmatch(text, -1) {
 		if f.Seat(m[1]) != nil {
@@ -76,11 +77,11 @@ func (f *Floor) Post(text string) error {
 	}
 	f.mu.Unlock()
 	if err != nil {
-		return err
+		return e, err
 	}
 	f.report(e)
 	f.kick()
-	return nil
+	return e, nil
 }
 
 // More grants one more round.
@@ -219,7 +220,7 @@ func (f *Floor) speak(ctx context.Context, s *Seat, entries []Entry, head, round
 	if ctx.Err() != nil {
 		return // stopped by the chair: the turn leaves no trace
 	}
-	e := Entry{From: s.ID, Seen: head, Round: round, Model: s.Model, Served: reply.Served, Ms: time.Since(start).Milliseconds()}
+	e := Entry{From: s.ID, Seen: head, Round: round, Model: s.Model, Served: reply.Served, Ms: time.Since(start).Milliseconds(), Calls: reply.Calls}
 	switch {
 	case err != nil:
 		e.Kind, e.Text = "error", err.Error()
@@ -230,8 +231,8 @@ func (f *Floor) speak(ctx context.Context, s *Seat, entries []Entry, head, round
 	default:
 		e.Kind, e.Text, e.Raw = "msg", reply.Text, reply.Raw
 	}
-	if err == nil {
-		e.Usage = &reply.Usage
+	if err == nil || reply.Usage != (minds.Usage{}) {
+		e.Usage = &reply.Usage // a failed turn still paid for the steps that ran
 	}
 	stored, err := f.Log.Append(e)
 	if err != nil {

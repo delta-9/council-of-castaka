@@ -27,7 +27,8 @@ type Entry struct {
 	Served string          `json:"served,omitempty"` // the model that answered, as reported
 	Ms     int64           `json:"ms,omitempty"`
 	Usage  *minds.Usage    `json:"usage,omitempty"`
-	Raw    json.RawMessage `json:"raw,omitempty"` // the native reply, for replay
+	Calls  []string        `json:"calls,omitempty"` // the tools the turn called, described
+	Raw    json.RawMessage `json:"raw,omitempty"`   // the native exchange, for replay
 }
 
 // Log is the session's append-only record. An entry is written to disk before

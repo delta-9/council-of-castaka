@@ -1,15 +1,19 @@
 // Command council runs a council of minds from several labs on a technical
 // matter. Every message, the chair's or a mind's, is queued into the next turn
-// of every other mind; internal/floor explains how.
+// of every other mind; internal/floor explains how. Started inside a GitHub
+// repository, the minds can read what git tracks there, and they can search
+// the web.
 //
 // Usage:
 //
 //	council [-roster minds|rehearsal] [-resume <session>] [-fake]
-//	council -q -m "matter" [-n rounds]
+//	council -q -m "matter" [-n rounds] [-fold seat]
+//	council -search "query"
 package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +30,7 @@ import (
 
 	"github.com/delta-9/council-of-castaka/internal/floor"
 	"github.com/delta-9/council-of-castaka/internal/minds"
+	"github.com/delta-9/council-of-castaka/internal/tools"
 )
 
 type price struct {
@@ -33,20 +38,45 @@ type price struct {
 	Out        float64 `json:"out"`
 	CacheRead  float64 `json:"cacheRead"`
 	CacheWrite float64 `json:"cacheWrite"`
+	Search     float64 `json:"search"` // $ per web search the provider runs
+}
+
+// searchServer is the MCP server that seats with "search": "mcp" search through.
+type searchServer struct {
+	Command []string          `json:"command"`
+	Env     map[string]string `json:"env"`
+	Key     string            `json:"key"` // the entry of keys whose variable the server reads
+	Tool    string            `json:"tool"`
 }
 
 type config struct {
-	EnvFile   string                  `json:"envFile"`
-	Keys      map[string]string       `json:"keys"` // provider → variable name
-	Sessions  string                  `json:"sessions"`
-	Rounds    int                     `json:"rounds"`
-	Words     int                     `json:"words"`
-	MaxTokens int64                   `json:"maxTokens"`
-	Rosters   map[string][]minds.Spec `json:"rosters"`
-	Prices    map[string]price        `json:"prices"` // $ per 1M tokens
+	EnvFile      string                  `json:"envFile"`
+	Keys         map[string]string       `json:"keys"` // provider → variable name
+	Sessions     string                  `json:"sessions"`
+	Rounds       int                     `json:"rounds"`
+	Words        int                     `json:"words"`
+	MaxTokens    int64                   `json:"maxTokens"`
+	SearchServer searchServer            `json:"searchServer"`
+	Rosters      map[string][]minds.Spec `json:"rosters"`
+	Prices       map[string]price        `json:"prices"` // $ per 1M tokens
 }
 
-const synth = "Synthesize the debate so far: the consensus, the open disagreements and who holds each, and what to test first."
+// session is fixed when a session starts: its roster, its repository and its
+// system prompts. Changing any of them under replayed turns would break those
+// turns, starting with Fable's history check, which compares the tools too.
+type session struct {
+	Created string            `json:"created"`
+	Root    string            `json:"root,omitempty"`
+	Repo    string            `json:"repo,omitempty"`
+	Roster  []minds.Spec      `json:"roster"`
+	Systems map[string]string `json:"systems"`
+}
+
+const foldPrompt = "Fold the council's debate into the final report for the chair, as a standalone Markdown document. " +
+	"Lead with the conclusion. Then give the facts, evidence and arguments that led to it: who brought them, " +
+	"and the files, commits and sources they came from. Say what is still disputed, and who holds which position. " +
+	"When relevant, end with the next steps. Check with your tools anything you are unsure of before you write. " +
+	"The word limit does not apply."
 
 const help = `Type a line to post it; every mind reads it at its next turn.
 """            start or end a multi-line message
@@ -58,45 +88,76 @@ const help = `Type a line to post it; every mind reads it at its next turn.
 /seats         list the seats; /seat -id or /seat +id takes one off or back
 /attach PATH   post a file
 /view SEAT     what that seat receives next
-/synth [SEAT]  ask one seat for a synthesis
-/cost          tokens and estimated cost per seat
+/fold [SEAT]   that seat folds the debate into report.md
+/cost          tokens, searches and estimated cost per seat
 /quit          stop and leave`
 
+type flags struct {
+	config, roster, resume, matter, fold, search string
+	quiet, fake                                  bool
+	rounds                                       int
+}
+
 func main() {
-	cfgPath := flag.String("config", "council.json", "config file, looked up next to the binary too")
-	rosterName := flag.String("roster", "minds", "roster from the config")
-	resume := flag.String("resume", "", "session directory to reopen")
-	quiet := flag.Bool("q", false, "no console: post -m, run the rounds, print the transcript path")
-	matter := flag.String("m", "", "the matter, with -q")
-	rounds := flag.Int("n", 0, "rounds granted to each chair message (default from the config)")
-	fakeAll := flag.Bool("fake", false, "every seat uses the fake mind, for free")
+	var fl flags
+	flag.StringVar(&fl.config, "config", "council.json", "config file, looked up next to the binary too")
+	flag.StringVar(&fl.roster, "roster", "minds", "roster from the config, for a new session")
+	flag.StringVar(&fl.resume, "resume", "", "session directory to reopen")
+	flag.BoolVar(&fl.quiet, "q", false, "no console: post -m, run the rounds, print the transcript path")
+	flag.StringVar(&fl.matter, "m", "", "the matter, with -q")
+	flag.StringVar(&fl.fold, "fold", "", "with -q: the seat that folds the debate; prints the report path")
+	flag.IntVar(&fl.rounds, "n", 0, "rounds granted to each chair message (default from the config)")
+	flag.BoolVar(&fl.fake, "fake", false, "every seat uses the fake mind, for free")
+	flag.StringVar(&fl.search, "search", "", "run one search through the MCP server and print the results")
 	flag.Parse()
-	if err := run(*cfgPath, *rosterName, *resume, *quiet, *matter, *rounds, *fakeAll); err != nil {
+	if err := run(fl); err != nil {
 		fmt.Fprintln(os.Stderr, "council:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cfgPath, rosterName, resume string, quiet bool, matter string, rounds int, fakeAll bool) error {
-	cfg, err := loadConfig(cfgPath)
+func run(fl flags) error {
+	cfg, err := loadConfig(fl.config)
 	if err != nil {
 		return err
 	}
-	roster, ok := cfg.Rosters[rosterName]
-	if !ok {
-		return fmt.Errorf("no roster %q in the config", rosterName)
+	keys := loadKeys(expand(cfg.EnvFile), cfg.Keys)
+	searcher := cfg.searcher(keys)
+	if searcher != nil {
+		defer searcher.Close()
 	}
+	if fl.search != "" {
+		if searcher == nil {
+			return errors.New("no searchServer in the config")
+		}
+		start := time.Now()
+		out, err := searcher.Search(context.Background(), fl.search)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s, %d bytes (about %d tokens)\n\n%s\n", time.Since(start).Round(time.Millisecond), len(out), len(out)/4, out)
+		return nil
+	}
+	roster, ok := cfg.Rosters[fl.roster]
+	if !ok {
+		return fmt.Errorf("no roster %q in the config", fl.roster)
+	}
+	rounds := fl.rounds
 	if rounds <= 0 {
 		rounds = cfg.Rounds
 	}
-	if quiet && matter == "" {
+	if fl.quiet && fl.matter == "" {
 		return errors.New(`-q needs -m "matter"`)
 	}
-	dir := resume
+	dir := fl.resume
 	if dir == "" {
 		dir = filepath.Join(expand(cfg.Sessions), time.Now().Format("2006-01-02-150405"))
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	sess, err := openSession(dir, cfg, roster)
+	if err != nil {
 		return err
 	}
 	log, err := floor.OpenLog(filepath.Join(dir, "log.jsonl"))
@@ -104,38 +165,57 @@ func run(cfgPath, rosterName, resume string, quiet bool, matter string, rounds i
 		return err
 	}
 	defer log.Close()
-	systems, err := loadSystems(dir, roster, cfg.Words)
-	if err != nil {
-		return err
+
+	var repo *tools.Repo
+	if sess.Root != "" {
+		repo = &tools.Repo{Root: sess.Root, Name: sess.Repo}
 	}
-	keys := loadKeys(expand(cfg.EnvFile), cfg.Keys)
+	c := &console{cfg: cfg, sess: sess, dir: dir, quiet: fl.quiet, tty: term.IsTerminal(int(os.Stdout.Fd()))}
 	var seats []*floor.Seat
-	for _, spec := range roster {
-		if fakeAll {
+	for _, spec := range sess.Roster {
+		kit := tools.Kit{Repo: repo}
+		if spec.Search == "mcp" {
+			if searcher == nil {
+				return fmt.Errorf("seat %s searches through MCP, but the config has no searchServer", spec.Seat)
+			}
+			kit.Search = searcher
+		}
+		if fl.fake {
 			spec.Provider = "fake"
 		}
 		key := keys[spec.Provider]
 		if spec.Provider != "fake" && key == "" {
 			return fmt.Errorf("seat %s: no %s in %s or the environment", spec.Seat, cfg.Keys[spec.Provider], cfg.EnvFile)
 		}
-		mind, err := minds.New(spec, key, minds.Options{MaxTokens: cfg.MaxTokens, Session: filepath.Base(dir)})
+		mind, err := minds.New(spec, key, minds.Options{MaxTokens: cfg.MaxTokens, Session: filepath.Base(dir), Tools: kit, Notify: c.notifier(spec.Seat)})
 		if err != nil {
 			return err
 		}
-		seats = append(seats, floor.NewSeat(spec.Seat, spec.Model, systems[spec.Seat], mind))
+		seats = append(seats, floor.NewSeat(spec.Seat, spec.Model, sess.Systems[spec.Seat], mind))
 	}
-	f := floor.New(log, seats, rounds)
-	c := &console{f: f, cfg: cfg, dir: dir, quiet: quiet, tty: term.IsTerminal(int(os.Stdout.Fd()))}
-	f.OnRound, f.OnEntry = c.onRound, c.onEntry
-	if quiet {
-		if err := f.Post(matter); err != nil {
-			return err
-		}
-		f.Wait()
+	c.f = floor.New(log, seats, rounds)
+	c.f.OnRound, c.f.OnEntry = c.onRound, c.onEntry
+	if !fl.quiet {
+		return c.run()
+	}
+	if _, err := c.f.Post(fl.matter); err != nil {
+		return err
+	}
+	c.f.Wait()
+	if fl.fold == "" {
 		fmt.Println(c.transcript())
 		return nil
 	}
-	return c.run()
+	if err := c.fold(fl.fold); err != nil {
+		return err
+	}
+	c.f.Wait()
+	report := c.report()
+	if report == "" {
+		return fmt.Errorf("%s wrote no report; see %s", fl.fold, c.transcript())
+	}
+	fmt.Println(report)
+	return nil
 }
 
 func loadConfig(path string) (config, error) {
@@ -155,35 +235,52 @@ func loadConfig(path string) (config, error) {
 	return cfg, nil
 }
 
-// loadSystems returns each seat's system prompt. A session writes them to
-// systems.json when it starts and reuses them verbatim when it resumes.
-func loadSystems(dir string, roster []minds.Spec, words int) (map[string]string, error) {
-	path := filepath.Join(dir, "systems.json")
-	systems := map[string]string{}
+// openSession reopens the session in dir, or starts one there from roster,
+// reading the repository the council was started in.
+func openSession(dir string, cfg config, roster []minds.Spec) (session, error) {
+	path := filepath.Join(dir, "session.json")
+	var s session
 	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &systems); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+		if err := json.Unmarshal(b, &s); err != nil {
+			return s, fmt.Errorf("%s: %w", path, err)
 		}
+		return s, nil
 	} else if !os.IsNotExist(err) {
-		return nil, err
+		return s, err
 	}
-	added := false
+	if _, err := os.Stat(filepath.Join(dir, "systems.json")); err == nil {
+		return s, fmt.Errorf("%s was started before the minds had tools; start a new session", dir)
+	}
+	s = session{Created: time.Now().Format("2006-01-02"), Roster: roster, Systems: map[string]string{}}
+	if cwd, err := os.Getwd(); err == nil {
+		if repo := tools.Find(cwd); repo != nil {
+			s.Root, s.Repo = repo.Root, repo.Name
+		}
+	}
 	for _, spec := range roster {
-		if _, ok := systems[spec.Seat]; !ok {
-			systems[spec.Seat] = floor.Charter(spec, roster, words)
-			added = true
-		}
+		s.Systems[spec.Seat] = floor.Charter(spec, roster, cfg.Words, s.Created, s.Repo)
 	}
-	if added {
-		b, err := json.MarshalIndent(systems, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(path, b, 0o600); err != nil {
-			return nil, err
-		}
+	b, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return s, err
 	}
-	return systems, nil
+	return s, os.WriteFile(path, b, 0o600)
+}
+
+// searcher returns the MCP web search the config names, or nil.
+func (cfg config) searcher(keys map[string]string) *tools.MCP {
+	s := cfg.SearchServer
+	if len(s.Command) == 0 {
+		return nil
+	}
+	var env []string
+	for k, v := range s.Env {
+		env = append(env, k+"="+v)
+	}
+	if name, key := cfg.Keys[s.Key], keys[s.Key]; name != "" && key != "" {
+		env = append(env, name+"="+key)
+	}
+	return &tools.MCP{Command: s.Command, Env: env, Tool: s.Tool}
 }
 
 // loadKeys reads the API keys by variable name from the env file; a variable
@@ -220,17 +317,28 @@ func expand(path string) string {
 }
 
 // console is the chair's seat: it reads lines, prints the floor, and keeps
-// transcript.md current.
+// transcript.md and report.md current.
 type console struct {
 	f     *floor.Floor
 	cfg   config
+	sess  session
 	dir   string
 	quiet bool
 	tty   bool
-	mu    sync.Mutex // serializes output and transcript writes
+
+	mu       sync.Mutex // serializes output, transcript writes and the fold
+	folding  string     // the seat writing the report, if any
+	foldFrom int        // the seq of the fold request
+	reported string     // the path of the last report
 }
 
 func (c *console) transcript() string { return filepath.Join(c.dir, "transcript.md") }
+
+func (c *console) report() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reported
+}
 
 func (c *console) color(code, s string) string {
 	if !c.tty {
@@ -243,6 +351,15 @@ func (c *console) say(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fmt.Println(s)
+}
+
+// notifier prints a seat's tool calls as they happen.
+func (c *console) notifier(seat string) func(string) {
+	return func(call string) {
+		if !c.quiet {
+			c.say(c.color("2", "  "+seat+" · "+call))
+		}
+	}
 }
 
 func (c *console) onRound(round int, seats []string) {
@@ -259,6 +376,19 @@ func (c *console) onEntry(e floor.Entry) {
 	if err := os.WriteFile(c.transcript(), []byte(md), 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "transcript:", err)
 	}
+	folded, failed := "", false
+	if c.folding != "" && e.From == c.folding && e.Seen >= c.foldFrom {
+		c.folding = ""
+		failed = e.Kind != "msg"
+		if !failed {
+			path := filepath.Join(c.dir, "report.md")
+			if err := os.WriteFile(path, []byte(e.Text+"\n"), 0o600); err != nil {
+				fmt.Fprintln(os.Stderr, "report:", err)
+			} else {
+				c.reported, folded = path, path
+			}
+		}
+	}
 	if c.quiet {
 		return
 	}
@@ -272,6 +402,26 @@ func (c *console) onEntry(e floor.Entry) {
 	default:
 		fmt.Println(c.color("31", fmt.Sprintf("#%d %s: error: %s", e.Seq, e.From, e.Text)))
 	}
+	if folded != "" {
+		fmt.Println(c.color("1", "report: "+folded))
+	} else if failed {
+		fmt.Println(c.color("31", "the fold failed; /fold again or pick another seat"))
+	}
+}
+
+// fold asks a seat to fold the debate into report.md.
+func (c *console) fold(seat string) error {
+	if c.f.Seat(seat) == nil {
+		return fmt.Errorf("no seat %s", seat)
+	}
+	e, err := c.f.Post("@" + seat + " " + foldPrompt)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.folding, c.foldFrom = seat, e.Seq
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *console) run() error {
@@ -279,7 +429,11 @@ func (c *console) run() error {
 	for i, s := range c.f.Seats {
 		members[i] = s.ID + " (" + s.Model + ")"
 	}
-	c.say(fmt.Sprintf("session %s\nseats: %s\n/help for commands", c.dir, strings.Join(members, ", ")))
+	reading := "no GitHub repository here: the minds read no files"
+	if c.sess.Repo != "" {
+		reading = "reading " + c.sess.Repo + ": what git tracks at " + c.sess.Root
+	}
+	c.say(fmt.Sprintf("session %s\nseats: %s\n%s\n/help for commands", c.dir, strings.Join(members, ", "), reading))
 
 	interrupts := make(chan os.Signal, 1)
 	signal.Notify(interrupts, os.Interrupt)
@@ -327,7 +481,7 @@ func (c *console) run() error {
 }
 
 func (c *console) post(text string) {
-	if err := c.f.Post(text); err != nil {
+	if _, err := c.f.Post(text); err != nil {
 		c.say("error: " + err.Error())
 	}
 }
@@ -369,12 +523,14 @@ func (c *console) command(line string) bool {
 		c.attach(arg)
 	case "/view":
 		c.view(arg)
-	case "/synth":
+	case "/fold":
 		seat := arg
 		if seat == "" {
 			seat = c.f.Seats[0].ID
 		}
-		c.post("@" + seat + " " + synth)
+		if err := c.fold(seat); err != nil {
+			c.say("fold: " + err.Error())
+		}
 	case "/cost":
 		c.say(c.cost())
 	case "/help":
@@ -421,10 +577,10 @@ func (c *console) view(id string) {
 // cost sums each seat's usage and prices it with council.json.
 func (c *console) cost() string {
 	type sum struct {
-		turns                int
-		in, read, write, out int64
-		usd                  float64
-		unpriced             bool
+		turns                          int
+		in, read, write, out, searches int64
+		usd                            float64
+		unpriced                       bool
 	}
 	per := map[string]*sum{}
 	var order []string
@@ -441,6 +597,7 @@ func (c *console) cost() string {
 		u := *e.Usage
 		s.turns++
 		s.in, s.read, s.write, s.out = s.in+u.Input, s.read+u.CacheRead, s.write+u.CacheWrite, s.out+u.Output
+		s.searches += u.Searches
 		p, ok := c.cfg.Prices[e.Served]
 		if !ok {
 			p, ok = c.cfg.Prices[e.Model]
@@ -453,10 +610,11 @@ func (c *console) cost() string {
 		if write == 0 {
 			write = p.In
 		}
-		s.usd += (float64(u.Input)*p.In + float64(u.CacheRead)*p.CacheRead + float64(u.CacheWrite)*write + float64(u.Output)*p.Out) / 1e6
+		s.usd += (float64(u.Input)*p.In+float64(u.CacheRead)*p.CacheRead+float64(u.CacheWrite)*write+float64(u.Output)*p.Out)/1e6 +
+			float64(u.Searches)*p.Search
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-10s %5s %9s %9s %9s %9s %9s\n", "seat", "turns", "input", "cached", "written", "output", "est. $")
+	fmt.Fprintf(&b, "%-10s %5s %9s %9s %9s %9s %8s %9s\n", "seat", "turns", "input", "cached", "written", "output", "searches", "est. $")
 	total := 0.0
 	for _, id := range order {
 		s := per[id]
@@ -464,10 +622,10 @@ func (c *console) cost() string {
 		if s.unpriced {
 			usd += "+"
 		}
-		fmt.Fprintf(&b, "%-10s %5d %9d %9d %9d %9d %9s\n", id, s.turns, s.in, s.read, s.write, s.out, usd)
+		fmt.Fprintf(&b, "%-10s %5d %9d %9d %9d %9d %8d %9s\n", id, s.turns, s.in, s.read, s.write, s.out, s.searches, usd)
 		total += s.usd
 	}
-	fmt.Fprintf(&b, "total est. $%.4f (prices from council.json; + marks turns with no price)", total)
+	fmt.Fprintf(&b, "total est. $%.4f (prices from council.json; + marks turns with no price; MCP searches are in your MiniMax plan)", total)
 	return b.String()
 }
 

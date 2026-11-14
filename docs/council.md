@@ -8,16 +8,19 @@ The chair brings a technical pickle, and the greatest and quirkiest minds of fou
 
 - A terminal tool. You chair; five minds debate: Opus 5.5, Fable 5.2, Gemini 4 Hydrogen, Gemini 4 Carbon and GPT-6 Astra, with Grok later.
 - Each mind is the model itself, called with your API keys. There is no subscription CLI, so usage terms are not an issue.
-- You can interject at any time and nothing is lost. The transcript can be read while the debate runs and is saved afterwards.
-- The minds get no tools, so nothing they write can act.
+- Started inside a GitHub repository, the minds read what git tracks there, and all of them search the web, so they argue from the material and from fresh sources.
+- You can interject at any time and nothing is lost. The transcript can be read while the debate runs, and `/fold` turns the debate into a report.
+- The minds' tools only read: nothing they write can act.
 
-Not in v1: web search, private messages, personas, a web UI.
+Not yet: private messages, personas, a web UI.
 
 ## The floor: how a message reaches every mind's next turn
 
 One append-only log per session (`log.jsonl`) is the whole state. There is no queue object. A mind's queue is everything in the log that someone else wrote and that the mind has not yet seen.
 
-Each entry has `seq`, `from` (`chair` or a seat), `kind` (`msg`, `pass` or `error`) and `text`. A mind's turn also carries `seen` (the last `seq` it had read when it spoke), `model` (the seat's configured model), `served` (the model that answered), `usage`, and the provider's native reply for replay. Errors are shown to you and never to the minds. Each session folder also holds `systems.json`, every seat's system prompt, written when the session starts and reused verbatim on resume, so a later change to the charter never rewrites a running session.
+Each entry has `seq`, `from` (`chair` or a seat), `kind` (`msg`, `pass` or `error`) and `text`. A mind's turn also carries `seen` (the last `seq` it had read when it spoke), `model` (the seat's configured model), `served` (the model that answered), `usage`, the tools it called, and the provider's native exchange for replay: tool calls, results and reasoning. Errors are shown to you and never to the minds; a failed turn still records what its completed steps cost.
+
+Each session folder also holds `session.json`: the roster, the repository and every seat's system prompt, fixed when the session starts and reused verbatim on resume. Changing any of them under replayed turns would break those turns; Fable's history check compares the system prompt and the tool list too.
 
 A mind's request is rebuilt from the log on every turn (`floor.View`):
 
@@ -26,7 +29,7 @@ view(seat, head):
   prev ← 0
   for each turn t of seat (msg or pass), oldest first:
       user      ← others' msgs in (prev, t.seen], oldest first, each wrapped <msg from="…">
-      assistant ← t exactly as the provider returned it (reasoning included); "PASS" for a pass
+      assistant ← t exactly as the provider returned it (tool exchange and reasoning included); "PASS" for a pass
       prev ← t.seen
   user ← others' msgs in (prev, head]          ← the queue; an empty queue means no turn
 ```
@@ -48,7 +51,7 @@ Astra's #2 comes before Opus's #4 in the log, yet it is in Opus's queue, because
 
 What follows from this design:
 - Every request alternates user and assistant, which all three APIs require.
-- Each request extends the previous one byte for byte: the system prompt is frozen per session, history is append-only, and rendering is a pure function of the log (no clock, no randomness). So prompt caches hit, and Claude's history-editing check never trips on replayed reasoning.
+- Each request extends the previous one byte for byte: the session freezes the system prompt and the tools, history is append-only, and rendering is a pure function of the log (no clock, no randomness). So prompt caches hit, and Claude's history-editing check never trips on replayed reasoning.
 - `seen` records what each mind knew when it spoke.
 - Quitting or crashing loses nothing: resuming rereads the file (a last line cut short by a crash is dropped). A failed turn leaves its seat's queue intact for the next round.
 
@@ -63,16 +66,16 @@ What follows from this design:
 
 ## The minds
 
-| Seat | Model ID | Effort | Key (env name) | $ per 1M tokens, in / out | Notes |
-|---|---|---|---|---|---|
-| opus | `claude-opus-5-5` | high | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it |
-| fable | `claude-fable-5-2` | high | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention) |
-| hydrogen | `gemini-4-hydrogen` | high (its default) | `GEMINI_API_KEY` | 1.50 / 7.50, cache 0.075 | Google's "fast" Gemini 4; levels low to xhigh |
-| carbon | `gemini-4-carbon` | high | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium |
-| astra | `gpt-6-astra` | high | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | |
-| grok | later | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
+| Seat | Model ID | Effort | Search | Key (env name) | $ per 1M tokens, in / out | Notes |
+|---|---|---|---|---|---|---|
+| opus | `claude-opus-5-5` | high | its own | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it |
+| fable | `claude-fable-5-2` | high | MiniMax | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention) |
+| hydrogen | `gemini-4-hydrogen` | high (its default) | its own | `GEMINI_API_KEY` | 1.50 / 7.50, cache 0.075 | Google's "fast" Gemini 4; levels low to xhigh |
+| carbon | `gemini-4-carbon` | high | its own | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium |
+| astra | `gpt-6-astra` | high | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | |
+| grok | later | | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
 
-Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `provider`, `model`, `effort`, `card` in `council.json`), so two Opus seats with different cards would work.
+Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `provider`, `model`, `effort`, `search`, `card` in `council.json`), so two Opus seats with different cards would work.
 
 ## Charter (system prompt, frozen per session)
 
@@ -82,6 +85,9 @@ Every ID is listed by its key's models endpoint (2026-11-14); limits and prices 
 You are {seat} ({model}) on a council: {roster: seat (model, lab), …}.
 The chair brings a technical problem and decides; the council argues it out.
 Messages since your last turn arrive as <msg from="name">…</msg>, oldest first.
+Today is {date}. {What the seat can read (the repository, through read_file and
+git) and that it can search the web; check facts before you assert them and cite
+files, commits or URLs; what you read stays private, so quote what matters.}
 
 - Speak only for yourself: no lines for another member, no tags around your reply.
 - The council does not need to agree. If someone is wrong, say so and why.
@@ -97,7 +103,9 @@ Messages since your last turn arrive as <msg from="name">…</msg>, oldest first
 
 ## Chair's console
 
-- `council` opens a session and `council -resume <session>` reopens one. `-roster rehearsal` swaps in the cheap models, and `-fake` makes every seat answer with what it was shown, for free. `council -q -m "…"` runs the rounds without a console, saves the transcript and prints its path. That is Castaka's `-q`, and it can be called from Claude Code or by an agent.
+- `council` opens a session and `council -resume <session>` reopens one. `-roster rehearsal` swaps in the cheap models for a new session, and `-fake` makes every seat answer with what it was shown, for free.
+- `council -q -m "…" [-fold opus]` runs the rounds without a console and prints the transcript's path, or folds and prints the report's path. It can be called from Claude Code or by an agent.
+- `council -search "…"` runs one search through the MiniMax MCP server and prints what came back, with its size.
 - A typed line is posted at once and queued into every mind's next turn, even mid-round. `"""` on a line of its own starts or ends a multi-line message.
 - Commands:
   - `/more`: run one more round.
@@ -106,34 +114,78 @@ Messages since your last turn arrive as <msg from="name">…</msg>, oldest first
   - `/seats`: list the seats. `/seat -carbon` and `/seat +carbon` take a seat out or put it back.
   - `/attach <path>`: post a file (up to 256 KB) as a chair message.
   - `/view <seat>`: print exactly what that seat will receive next (the queue made visible).
-  - `/synth [seat]`: run a mention round that asks for the consensus, the open disagreements and who holds them, and what to test first.
+  - `/fold [seat]`: that seat folds the debate into `report.md` (below).
   - `/wait`: hold the next line until the floor is quiet, so piped chair scripts run in order.
   - `/cost` and `/quit`.
-- Each round prints its speakers; each message prints when it lands, with its round, time and tokens.
-- On disk: `~/.council/sessions/<date-time>/` holds `log.jsonl`, `systems.json` and `transcript.md`, all private to your user. The transcript is rewritten after each event, so it can stay open in a Markdown viewer.
+- Each round prints its speakers; each tool call prints as a dim line while the mind works (`opus · git log -n 5`, `fable · web search: …`); each message prints when it lands, with its round, time and tokens.
+- On disk: `~/.council/sessions/<date-time>/` holds `log.jsonl`, `session.json`, `transcript.md` and `report.md`, all private to your user. The transcript is rewritten after each event and lists each turn's tool calls, so it can stay open in a Markdown viewer.
+
+## Tools and web search
+
+### Reading the repository
+
+- **Root:** when the council starts inside a git repository with a GitHub remote, the repository's top level becomes the minds' read root. Otherwise they get web search only, and the console says so. Launching from the repository root is the usual case; git history is per repository, so a subdirectory could not fence it anyway.
+- **What they see is what git tracks.** Untracked and ignored files (`.env.local`, `trusad.md`, build output) are invisible, which keeps local secrets out of reach of a mind that a web page might try to steer.
+- **Two local tools, read-only** (`internal/tools`):
+  - `read_file(path, start, lines)`: a tracked file of the working tree with numbered lines, 400 lines by default and at most 2,000 or 100 KB per call. Symlinks that point outside the repository are refused.
+  - `git(args)`: one of `log`, `show`, `diff`, `blame`, `grep`, `ls-files`, `ls-tree`, `status`, `describe`, `rev-parse`, `shortlog`. It runs as `git --no-pager -c core.fsmonitor=false` without optional locks, adds `--no-ext-diff` to `log`, `show` and `diff`, and has a 30 s timeout and a 64 KB output cap. Options that write or reach past what git tracks are refused, abbreviations included: `--output`, `--no-index`, `--contents`, `--untracked`, `--open-files-in-pager`, `--ext-diff`, `--ignore-revs-file`, grep's `-O` and `-f`, blame's `-S`.
+- `tools_test.go` pins all of it on a scratch repository. Without the tracked-file check, it fails on `.env.local` and the ignored file.
+
+### Web search
+
+- Each seat searches either with its provider's own tool or through MiniMax's MCP server (`"search": "mcp"` in `council.json`): `uvx minimax-coding-plan-mcp`, with `MINIMAX_API_KEY` from the same env file. The server starts on the first search and stays up for the session.
+- **What a search costs**, measured 2026-11-14:
+
+  | Path | Results added to the mind's input | One search |
+  |---|---|---|
+  | Anthropic's own (`web_search_20260209`) | about 20K tokens | Opus about $0.09, Fable about $0.17 |
+  | OpenAI's own (`web_search`) | about 8.7K tokens | Astra $0.10 to $0.20 |
+  | Gemini's own (Google Search) | not billed as tokens | free up to 5,000 a month, then $0.014 |
+  | MiniMax MCP | about 800 tokens: results with titles, links and snippets, in 3.6 s | about $0.006 on Fable, in your plan |
+
+- So Fable and Astra search through MiniMax. Opus keeps its own, which reads whole pages. The Gemini seats keep theirs, which is nearly free. `/cost` counts the provider searches.
+- Provider details:
+  - Anthropic: at most 5 searches per request.
+  - Gemini: mixing Google Search with functions needs `toolConfig.includeServerSideToolInvocations`; a probe got a 400 without it.
+  - OpenAI: `web_search` is wired but unused, since both rosters send Astra through MiniMax.
+
+### A turn is a loop
+
+- The mind calls tools; the council runs the local ones and sends the results back until the mind answers. Searches the provider runs happen inside the request; Anthropic's `pause_turn` is resumed by resending. After 25 tool calls in a turn the tool choice becomes `none` and the mind must answer; 40 requests is the hard limit.
+- **The whole exchange is stored with the turn and replayed as returned on later turns:** tool calls, results and reasoning. Fable's history check and Gemini's signatures require it, and it lets each mind remember what it read. The tool list is built once per seat and never changes within a session, because Fable's check compares it.
+- **What a mind reads stays private to it**, so the charter tells it to quote what matters.
+
+### /fold {seat}
+
+- One mention round, in which that seat writes the final report. It leads with the conclusion, then gives the evidence and arguments that led there: who brought them, and which files, commits and sources they came from. It names what is still disputed, and ends with next steps when relevant. It may use the tools to check before writing, and the word limit does not apply.
+- The report is saved as `report.md` in the session folder (the latest fold wins) and its path is printed. A fold that fails says so.
+
+### Considered and dropped
+
+Running each mind through its own agent CLI (Claude Code, Codex, a Gemini CLI) in read-only mode. Their tools would come free, but each brings its own sandbox rules, a large coding-agent prompt on every turn, and session state outside the floor. That loses the shared log, replay and caching the rehearsals proved.
 
 ## Provider notes (knowledge, not gates)
 
 - **Anthropic** (Opus 5.5, Fable 5.2), `minds/anthropic.go`:
   - Thinking is always on. `Thinking` stays unset and `OutputConfig.Effort` sets the depth. Sampling parameters and prefill return 400.
-  - Requests are not streamed: `maxTokens` is 16000 and the request timeout 15 minutes. If long Fable turns time out, streaming is the next step.
+  - Requests are not streamed: `maxTokens` is 16000 and the request timeout 15 minutes. The council's own report on this question is under Open below.
   - Top-level `CacheControl` caches the prefix.
-  - Each seat's own turns are replayed with `BetaMessage.ToParam()` on the stored response, thinking blocks and signatures included. The append-only floor keeps them valid under the history-editing check, which Fable 5.2 enforces on every account. After a mid-output fallback, the reasoning blocks before the last fallback block are left out, as the fallback rules require.
+  - A turn's exchange is replayed message by message with `param.Override`; each response becomes its message through `BetaMessage.ToParam()`, thinking blocks and signatures included. After a mid-output fallback, the reasoning blocks before the last fallback block are left out, as the fallback rules require.
   - `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). A turn that another model rescued is labelled with that model. A refusal that survives the fallback is an error you see, and the seat sits out the round.
 - **Gemini** (Hydrogen, Carbon), `minds/gemini.go`:
-  - The key's model list shows `generateContent` for both, and v1 uses it.
-  - Thinking level is set per seat (the SDK's enum is upper case, so effort is upper-cased). The output cap covers thinking and answer together.
-  - Google's current docs describe the Interactions API, whose stateless mode wants thought blocks resent exactly as received. The floor's replay rule covers that on either surface. If `generateContent` falls short on Gemini 4, the adapter moves to Interactions.
+  - `generateContent`, with the thinking level set per seat (the SDK's enum is upper case, so effort is upper-cased). The output cap covers thinking and answer together.
+  - Function results go back as `functionResponse` parts. Server-side search steps come back as signed `toolCall`/`toolResponse` parts and are replayed with the rest; the Go SDK's `Part` keeps them through a save and reload.
+  - Google's current docs describe the Interactions API, whose stateless mode also wants thought blocks resent exactly as received. `generateContent` does everything the council needs, so v1 stays on it.
 - **OpenAI** (Astra), `minds/openai.go`:
   - Responses API, with `reasoning.effort` from low to max (`none` returns 400).
-  - `store: false`, because the log is the state. Its output items are replayed with `param.Override` and `include: ["reasoning.encrypted_content"]`, when they came from the same model.
+  - `store: false`, because the log is the state. Output items, encrypted reasoning included, are replayed with `param.Override` when they came from the same model. Function calls are answered with `function_call_output` items.
   - `prompt_cache_key` per session and seat; caching is automatic, and usage reports cache writes separately. Prompts over 272K input tokens cost 2× on input and 1.5× on output.
 - **Data terms:** Anthropic and OpenAI do not train on API traffic by default. Gemini counts as paid only for a key whose Cloud project has active billing; the council's key is on paid Tier 1 (checked 2026-11-14), so prompts are not used for training and are logged only to detect abuse.
 - **SDKs:** `anthropic-sdk-go/v2` v2.9.0, `google.golang.org/genai` v1.77.0, `openai-go/v3` v3.99.0. Grok comes later through `openai-go` with xAI's base URL. Adding them moved `go.mod` to Go 1.26.
 
-## Rehearsal
+## Rehearsals
 
-The same seats, adapters and requests on a cheaper roster (`-roster rehearsal`): the real models at lower effort where their contract matters, and the cheapest model with the same contract where it doesn't.
+The same seats, adapters and requests on a cheaper roster (`-roster rehearsal`): the real models at lower effort where their contract matters, and the cheapest model with the same contract where it doesn't. Search modes are the same as in the `minds` roster.
 
 | Seats | Rehearsal model | Effort | Why |
 |---|---|---|---|
@@ -141,27 +193,9 @@ The same seats, adapters and requests on a cheaper roster (`-roster rehearsal`):
 | hydrogen, carbon | `gemini-4-hydrogen` | low | The Gemini 4 contract itself, at its cheapest ($1.50 / $7.50). |
 | astra | `gpt-6-luna` | medium (its default) | The same Responses contract as Astra (effort levels, encrypted reasoning, caching, the 272K price step) at 1% of the price ($0.10 / $0.50). |
 
-The run is a piped chair script:
+The first `sleep` in a piped chair script lets the binary start: macOS scans a freshly built binary on its first launch, and lines that arrive before the console reads them all land in round 1. A script must not be piped into `head`, which kills the council on its next write.
 
-```
-(sleep 1; echo "Should we shard the media table or partition it?"; sleep 2
- echo "Assume 2B rows, 80% cold."                    # lands during round 1
- echo "/wait"; echo "@astra defend your position against opus"
- echo "/wait"; echo "/view carbon"; echo "/cost"; echo "/quit") | ./council -roster rehearsal -resume <session>
-(echo "/more"; echo "/wait"; echo "/quit") | ./council -roster rehearsal -resume <session>
-```
-
-The first `sleep` lets the binary start: macOS scans a freshly built binary on its first launch, and lines that arrive before the console reads them all land in round 1.
-
-It passes when:
-- round 1 is blind (no turn had read another mind's message), and the interjection is in every round-2 queue;
-- the mention round runs Astra alone, and `/view carbon` shows the mention and Astra's reply in Carbon's queue;
-- Fable never answers 400 on its replayed turns, before or after the restart;
-- cache reads show up once the transcript passes each provider's minimum.
-
-What it can't show: Carbon and Astra themselves, the minds at full effort (Fable's long turns), and fallbacks, which only run on a refusal. Phase 3's first round covers the first two.
-
-### Results, 2026-11-14
+### 1. The floor, 2026-11-14
 
 Session `~/.council/sessions/2026-11-14-rehearsal`: 20 turns over five rounds, with a restart before the last one. Every pass condition held, and no turn failed.
 - **Queues:** round 1 read only #1; the interjection (#2) landed during round 1 and every round-2 turn read it; the mention round (round 4) was Astra alone; `/view carbon` showed `#15 astra, #16 fable, #17 opus, #18 chair, #19 astra`; after the restart, `/more` ran the four seats with something new and skipped Astra.
@@ -171,36 +205,55 @@ Session `~/.council/sessions/2026-11-14-rehearsal`: 20 turns over five rounds, w
 - **Cost:** $0.55 in all: Fable $0.33, Opus $0.17, the two Hydrogen seats $0.05, Luna $0.002.
 - **The debate itself:** the minds read each other. In round 3, Opus answered Fable's migration plan with two bugs it would hit at cutover, and Fable conceded a point to Opus on the partition key.
 
+### 2. Tools, search and /fold, 2026-11-14
+
+Session `~/.council/sessions/2026-11-14-tools`, run inside this repository. The question needed the code and the web: "Should cmd/council stream its Anthropic requests instead of waiting up to 15 minutes on one non-streaming call?" Two rounds, then `/fold opus`. No turn failed.
+- **Tools:** every seat read the code before arguing, through `git ls-files`, `git grep` and `read_file` on `anthropic.go`, `minds.go` and `floor.go`. Astra (Luna) made 16 calls in its first turn.
+- **Search:** Opus used 7 Anthropic searches, the two Hydrogen seats 3 Google searches, and Fable and Astra searched through MiniMax. Gemini's server-side search steps and functions mixed in one turn and replayed cleanly.
+- **Replay:** Fable accepted its replayed tool exchange, with signed thinking, in round 2 (round 3 was the fold, Opus alone). Opus replayed its exchanges in rounds 2 and 3 without error.
+- **Fold:** Opus made five tool calls to check facts before writing a 9 KB `report.md`. The report has a conclusion, file:line evidence, cited sources, a table of what is still disputed, and next steps.
+- **Time and cost:** 12 to 50 s per turn that spoke, about 3 s per pass. $0.92 in all: Opus $0.47 over three turns with its context at 109K cached tokens by the fold, Fable $0.30, the two Hydrogen seats $0.14, Luna $0.006.
+
 ## Cost shape
 
-Each turn rereads the transcript. Caching makes that cheap, so thinking and output tokens are most of the bill. A rough estimate at high effort, assuming about 3.5K output tokens per turn: about $0.55 per round of five seats, with Astra and Fable at roughly 70% of it. Thinking lengths vary a lot, so trust `/cost`, which is computed from each turn's usage and the prices in `council.json`.
+Each turn rereads the transcript, and caching makes that cheap. So thinking, output and freshly written context (tool results, search content) make up most of the bill.
+- **Without tools,** at high effort and about 3.5K output tokens per turn, the estimate is about $0.55 per round of five seats, with Astra and Fable at roughly 70% of it.
+- **With tools,** a mind's context grows with everything it reads and stays cached for the session. Opus's native searches are the fastest-growing part.
+
+Trust `/cost`, which is computed from each turn's usage and the prices in `council.json`.
 
 ## Code shape
 
-Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 1,350 lines with comments, half of them the console:
-- `internal/floor`: the log (`log.go`), `View` (`view.go`, with `view_test.go`), rounds (`floor.go`), the charter and the transcript.
-- `internal/minds`: one file per provider, plus a `fake` mind that echoes what it received.
-- `cmd/council`: flags, the console, `/cost`.
-- `council.json`: the rosters (`minds`, `rehearsal`), the key file and its variable names, the defaults and the prices. No secrets.
+Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 2,300 lines with comments, plus 242 lines of tests:
+- `internal/floor`: the log, `View`, rounds, the charter, the transcript.
+- `internal/minds`: one file per provider, each with its tool loop, plus a `fake` mind that echoes what it received and reads the last commit.
+- `internal/tools`: the repository tools behind the git guard, and the MCP client.
+- `cmd/council`: flags, sessions, the console, `/fold`, `/cost`.
+- `council.json`: the rosters, the key file and its variable names, the search server, the defaults and the prices. No secrets.
 
-The test runs `View` over a fixture log with a parallel round whose replies land out of order, a chair message mid-round, a mention round, a pass and a failed turn. It catches the regression that matters: a mind missing a message, or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
+Tests, each catching one regression:
+- `view_test.go`: a mind missing a message or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
+- `tools_test.go`: a mind reading something git does not track, or a tool writing a file.
+- `floor_test.go`: a failed turn dropping what its completed steps cost from `/cost`.
 
 ## Phases
 
-1. Core, standard library only: the floor, the console, the transcript, the `fake` mind and the view test. Done.
-2. Providers and rehearsal: the three adapters, `council.json`, and the rehearsal run above. Done; results above.
-3. The real minds: `-roster minds` on a real pickle, with `/cost` read against the estimate.
+1. Core: the floor, the console, the transcript, the `fake` mind and the view test. Done.
+2. Providers and the first rehearsal. Done.
+3. The real minds: `-roster minds` on a real pickle, with `/cost` read against the estimate. Next.
+4. Tools, web search and `/fold`. Done; second rehearsal above.
 
-**v1 is done when** all of these hold:
-- the rehearsal passes;
-- a real pickle runs two rounds with all five minds;
-- `/view` matches the log;
-- usage shows cache reads on each provider once the transcript passes that provider's minimum;
-- `-q` writes the same transcript as the console.
+## Open, from the council's own report
 
-**Later, only if v1 earns it:**
+The tools rehearsal's report (in its session) answered its question: stream the Anthropic requests, for liveness. The points it raised about this code:
+- **One stalled seat blocks the round.** `floor.go` waits for every seat, and a dead Anthropic connection holds that wait for 15 minutes per attempt, about 45 with the SDK's two retries. The fix it proposes: stream each request, accumulate it into the same `BetaMessage` before the rest of `Speak` sees it, and watch for stalls at the transport by bytes received, since pings may not reach the code.
+- **Retrying a step that fails mid-stream:** still disputed (Fable for, Astra against, Opus on stalls only).
+- **A claimed 10-minute response-header timeout** in the SDK's default client: unverified; a test server that waits 11 minutes before its headers would settle it.
+- **Failed turns lost their cost:** fixed. The minds now return the usage of the steps that ran along with the error, and `floor_test.go` pins it.
+
+## Later, only if v1 earns it
+
 - Grok.
-- Web search per seat, using each provider's own.
 - `/thoughts <seat>`, so you can read a mind's reasoning summary; never shown to the other minds.
 - Anonymous seats (A, B, C), to test whether the minds defer to brands.
 - Castaka-style private messages.

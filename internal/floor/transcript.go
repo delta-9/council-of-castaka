@@ -19,7 +19,11 @@ func Transcript(title string, seats []*Seat, entries []Entry) string {
 		case e.Kind == "msg" && e.From == "chair":
 			fmt.Fprintf(&b, "\n**chair** · #%d\n\n> %s\n", e.Seq, strings.ReplaceAll(e.Text, "\n", "\n> "))
 		case e.Kind == "msg":
-			fmt.Fprintf(&b, "\n### %s · round %d · #%d\n\n*%s*\n\n%s\n", e.From, e.Round, e.Seq, Meta(e), e.Text)
+			fmt.Fprintf(&b, "\n### %s · round %d · #%d\n\n*%s*\n", e.From, e.Round, e.Seq, Meta(e))
+			if len(e.Calls) > 0 {
+				fmt.Fprintf(&b, "\n*%d calls: %s*\n", len(e.Calls), strings.Join(e.Calls, " · "))
+			}
+			fmt.Fprintf(&b, "\n%s\n", e.Text)
 		case e.Kind == "pass":
 			fmt.Fprintf(&b, "\n*%s passes · round %d · #%d*\n", e.From, e.Round, e.Seq)
 		case e.Kind == "error":
