@@ -82,6 +82,10 @@ type Spec struct {
 	Effort   string `json:"effort"`
 	Search   string `json:"search,omitempty"` // "native" (the default), "mcp" or "off"
 	Card     string `json:"card,omitempty"`
+	// MaxTokens overrides the session's output budget for this seat; a model
+	// that thinks long at high effort (Carbon) needs more, since its thinking
+	// and its answer share the budget.
+	MaxTokens int64 `json:"maxTokens,omitempty"`
 }
 
 // NativeSearch reports whether the seat searches with its provider's own tool.
@@ -92,17 +96,37 @@ func (s Spec) NativeSearch() bool {
 // Options apply to every mind of a session.
 type Options struct {
 	MaxTokens int64
+	MaxCalls  int          // local tool calls per turn before the mind must answer; 0 means DefaultMaxCalls
 	Session   string       // keys OpenAI's prompt cache per session and seat
 	Tools     Toolbox      // the seat's local tools; never nil
 	Notify    func(string) // reports each tool call as it happens; may be nil
 }
 
 const (
-	// MaxCalls is how many local tools a mind may call in one turn before it must answer.
-	MaxCalls = 25
+	// DefaultMaxCalls is how many local tools a mind may call in one turn before it must answer.
+	DefaultMaxCalls = 25
 	// maxSteps bounds the requests of one turn, server-side pauses included.
 	maxSteps = 40
+	// nudge asks once for the answer when a turn ends cleanly with no text.
+	nudge = "Your reply came back empty. Answer now, in text, with what you have."
 )
+
+func (o Options) maxCalls() int {
+	if o.MaxCalls > 0 {
+		return o.MaxCalls
+	}
+	return DefaultMaxCalls
+}
+
+// spent marks the result of a call that used up the turn's tool budget. Told
+// nothing, Fable once announced one more check it could no longer run and
+// ended its turn without an answer.
+func spent(out string, calls int, opt Options) string {
+	if calls < opt.maxCalls() {
+		return out
+	}
+	return out + fmt.Sprintf("\n\n[That was this turn's last tool call (%d): tools are off now. Answer with what you have.]", opt.maxCalls())
+}
 
 // New builds the mind for spec.
 func New(spec Spec, key string, opt Options) (Mind, error) {

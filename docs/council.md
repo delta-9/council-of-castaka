@@ -71,7 +71,7 @@ What follows from this design:
 | opus | `claude-opus-5-5` | high | its own | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it |
 | fable | `claude-fable-5-2` | high | MiniMax | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention) |
 | hydrogen | `gemini-4-hydrogen` | high (its default) | its own | `GEMINI_API_KEY` | 1.50 / 7.50, cache 0.075 | Google's "fast" Gemini 4; levels low to xhigh |
-| carbon | `gemini-4-carbon` | high | its own | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium |
+| carbon | `gemini-4-carbon` | high | its own | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium; `maxTokens` 32768, since at high effort it thought past 16K |
 | astra | `gpt-6-astra` | high | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | |
 | grok | later | | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
 
@@ -103,7 +103,7 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 
 ## Chair's console
 
-- `council` opens a session and `council -resume <session>` reopens one. `-roster rehearsal` swaps in the cheap models for a new session, and `-fake` makes every seat answer with what it was shown, for free.
+- `council` opens a session and `council -resume <session>` reopens one with the roster it started with. `-roster rehearsal` picks the cheap models for a new session, and `-fake` makes every seat answer with what it was shown, for free.
 - `council -q -m "…" [-fold opus]` runs the rounds without a console and prints the transcript's path, or folds and prints the report's path. It can be called from Claude Code or by an agent.
 - `council -search "…"` runs one search through the MiniMax MCP server and prints what came back, with its size.
 - A typed line is posted at once and queued into every mind's next turn, even mid-round. `"""` on a line of its own starts or ends a multi-line message.
@@ -151,7 +151,11 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 
 ### A turn is a loop
 
-- The mind calls tools; the council runs the local ones and sends the results back until the mind answers. Searches the provider runs happen inside the request; Anthropic's `pause_turn` is resumed by resending. After 25 tool calls in a turn the tool choice becomes `none` and the mind must answer; 40 requests is the hard limit.
+- The mind calls tools; the council runs the local ones and sends the results back until the mind answers. Searches the provider runs happen inside the request; Anthropic's `pause_turn` is resumed by resending. 40 requests is the hard limit.
+- **The tool budget** is 25 calls a turn (`maxCalls` in `council.json`):
+  - The result of the call that uses it up says so ("tools are off now: answer with what you have"), and the tool choice becomes `none`. Told nothing, Fable once announced a check it could no longer run and ended its turn empty.
+  - A clean stop with no text gets one nudge request.
+  - Calls that arrive together in one response are all answered, so a mind can pass the budget within that response: Carbon made 7 with a budget of 2.
 - **The whole exchange is stored with the turn and replayed as returned on later turns:** tool calls, results and reasoning. Fable's history check and Gemini's signatures require it, and it lets each mind remember what it read. The tool list is built once per seat and never changes within a session, because Fable's check compares it.
 - **What a mind reads stays private to it**, so the charter tells it to quote what matters.
 
@@ -214,6 +218,20 @@ Session `~/.council/sessions/2026-11-14-tools`, run inside this repository. The 
 - **Fold:** Opus made five tool calls to check facts before writing a 9 KB `report.md`. The report has a conclusion, file:line evidence, cited sources, a table of what is still disputed, and next steps.
 - **Time and cost:** 12 to 50 s per turn that spoke, about 3 s per pass. $0.92 in all: Opus $0.47 over three turns with its context at 109K cached tokens by the fold, Fable $0.30, the two Hydrogen seats $0.14, Luna $0.006.
 
+### 3. The real minds, 2026-11-14
+
+Session `~/.council/sessions/2026-11-14-minds`, the `minds` roster at high effort, watched live in Ghostty. The chair pasted rehearsal 2's report and asked the council to check it again against the code and the current docs. Two rounds, then `/fold fable`, in 14 minutes.
+- **Two failed turns in round 1, both back in round 2:**
+  - Fable used its 25 tool calls and ended its turn with no text.
+  - Carbon thought past its 16K output budget after 6 minutes.
+  - Their tokens still counted in `/cost`. Both are fixed since: the tool-budget notice with its nudge, and Carbon's 32K budget.
+- **Tools:** up to 26 calls a turn. Opus ran 5 Anthropic searches and the Gemini seats 26 Google searches; Fable and Astra searched through MiniMax.
+- **Fold:** Fable wrote a 1,949-word report. It checks rehearsal 2's report against the code, saying what holds, what is stale or wrong, and what was missed. It includes a table of what it could and could not verify, the exact streaming change, and a tests-first plan.
+- **Time and cost:** 34 s to 6 min per turn. $5.36 in all: Fable $2.52 (112K tokens of written context, 33K output), Astra $0.79, Carbon $0.77, Hydrogen $0.72, Opus $0.57.
+- **Errors never reach the minds,** so the fold said nothing had failed yet while two of its own turns had.
+
+A cap check afterwards (`maxCalls` 2, one round, $0.25) had Opus, Fable, Luna and the real Carbon each reach the budget and then answer; Carbon took its 32,768-token budget. The nudge did not fire, so that path has not yet run against a provider.
+
 ## Cost shape
 
 Each turn rereads the transcript, and caching makes that cheap. So thinking, output and freshly written context (tool results, search content) make up most of the bill.
@@ -224,7 +242,7 @@ Trust `/cost`, which is computed from each turn's usage and the prices in `counc
 
 ## Code shape
 
-Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 2,300 lines with comments, plus 242 lines of tests:
+Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 2,400 lines with comments, plus 242 lines of tests:
 - `internal/floor`: the log, `View`, rounds, the charter, the transcript.
 - `internal/minds`: one file per provider, each with its tool loop, plus a `fake` mind that echoes what it received and reads the last commit.
 - `internal/tools`: the repository tools behind the git guard, and the MCP client.
@@ -240,16 +258,24 @@ Tests, each catching one regression:
 
 1. Core: the floor, the console, the transcript, the `fake` mind and the view test. Done.
 2. Providers and the first rehearsal. Done.
-3. The real minds: `-roster minds` on a real pickle, with `/cost` read against the estimate. Next.
-4. Tools, web search and `/fold`. Done; second rehearsal above.
+3. The real minds: `-roster minds` on a real pickle. Done in rehearsal 3; its two round-1 failures are fixed.
+4. Tools, web search and `/fold`. Done; rehearsal 2.
+5. Streaming the Anthropic requests, tests first. Next, if wanted (see Open).
 
-## Open, from the council's own report
+## Open, from the council's own reports
 
-The tools rehearsal's report (in its session) answered its question: stream the Anthropic requests, for liveness. The points it raised about this code:
-- **One stalled seat blocks the round.** `floor.go` waits for every seat, and a dead Anthropic connection holds that wait for 15 minutes per attempt, about 45 with the SDK's two retries. The fix it proposes: stream each request, accumulate it into the same `BetaMessage` before the rest of `Speak` sees it, and watch for stalls at the transport by bytes received, since pings may not reach the code.
-- **Retrying a step that fails mid-stream:** still disputed (Fable for, Astra against, Opus on stalls only).
-- **A claimed 10-minute response-header timeout** in the SDK's default client: unverified; a test server that waits 11 minutes before its headers would settle it.
-- **Failed turns lost their cost:** fixed. The minds now return the usage of the steps that ran along with the error, and `floor_test.go` pins it.
+Both reports, from rehearsal 2 and from the real minds checking it in rehearsal 3, say to stream the Anthropic requests, for liveness. One stalled connection holds the whole round at `floor.go`'s `wg.Wait()`. The second report's version of the change, in `anthropic.go`:
+- **Stream and accumulate.** Each step is streamed and built back into the same `BetaMessage` before the rest of `Speak` sees it. A stream that ends without `message_stop` fails the step. Otherwise it would be stored as a good turn, and Fable's history check would reject every later turn of that seat.
+- **A watchdog at the transport** counts bytes received, pings included, from the start of the request, so the wait before headers is covered too. It cancels a child context, never the chair's, because the floor drops the turns the chair cancelled.
+- **Bounds:** 15 minutes per step and 30 per turn. Today nothing bounds a turn: 40 steps of 15 minutes is 10 hours.
+- **Usage** is recorded once per request, success or failure. A failed stream's output tokens can't be known, since they arrive only in `message_delta`.
+- **No retry** of a step that fails mid-stream: 4 to 1, Fable dissenting. The next round reruns the whole turn, tool calls included.
+- **The idle limit** starts at 120 s and is calibrated on a high-effort turn. Thinking is probably silent on the wire, and pings have no promised schedule.
+- **Tests first**, on recorded SSE fixtures replayed from an `httptest.Server`: truncation, ping-only traffic, silence before and after headers, a mid-stream error, cancellation by the chair, and `pause_turn`.
+
+Fixed already: a failed turn keeps the cost of its completed steps (`floor_test.go`).
+
+Open for the chair: should `/stop` keep the cost of the turns it cancels? Today they leave no trace.
 
 ## Later, only if v1 earns it
 

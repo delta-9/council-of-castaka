@@ -54,7 +54,7 @@ func (m *anthropicMind) Speak(ctx context.Context, system string, turns []Turn) 
 	}
 	var reply Reply
 	var exchange []anthropic.BetaMessageParam
-	calls := 0
+	calls, nudged := 0, false
 	for step := 0; step < maxSteps; step++ {
 		params := anthropic.BetaMessageNewParams{
 			Model:        anthropic.Model(m.spec.Model),
@@ -67,7 +67,7 @@ func (m *anthropicMind) Speak(ctx context.Context, system string, turns []Turn) 
 			Betas:        []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_07_01},
 			Tools:        m.tools,
 		}
-		if calls >= MaxCalls {
+		if calls >= m.opt.maxCalls() {
 			params.ToolChoice = anthropic.BetaToolChoiceUnionParam{OfNone: &anthropic.BetaToolChoiceNoneParam{}}
 		}
 		resp, err := m.client.Beta.Messages.New(ctx, params)
@@ -102,6 +102,11 @@ func (m *anthropicMind) Speak(ctx context.Context, system string, turns []Turn) 
 					text.WriteString(b.Text)
 				}
 			}
+			if strings.TrimSpace(text.String()) == "" && resp.StopReason == anthropic.BetaStopReasonEndTurn && !nudged {
+				nudged = true
+				exchange = append(exchange, anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(nudge)))
+				continue
+			}
 			reply.Text, reply.Stop = text.String(), string(resp.StopReason)
 			if resp.StopReason == anthropic.BetaStopReasonRefusal {
 				reply.Stop = "refusal " + string(resp.StopDetails.Category)
@@ -114,7 +119,7 @@ func (m *anthropicMind) Speak(ctx context.Context, system string, turns []Turn) 
 			if b.Type == "tool_use" {
 				calls++
 				out, failed := call(ctx, m.opt, &reply, b.Name, b.Input)
-				results = append(results, anthropic.NewBetaToolResultBlock(b.ID, out, failed))
+				results = append(results, anthropic.NewBetaToolResultBlock(b.ID, spent(out, calls, m.opt), failed))
 			}
 		}
 		exchange = append(exchange, anthropic.NewBetaUserMessage(results...))

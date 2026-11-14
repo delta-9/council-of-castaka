@@ -68,10 +68,10 @@ func (m *geminiMind) Speak(ctx context.Context, system string, turns []Turn) (Re
 	}
 	var reply Reply
 	var exchange []*genai.Content
-	calls := 0
+	calls, nudged := 0, false
 	for step := 0; step < maxSteps; step++ {
 		contents := append(append([]*genai.Content(nil), history...), exchange...)
-		resp, err := m.client.Models.GenerateContent(ctx, m.spec.Model, contents, m.config(system, calls >= MaxCalls))
+		resp, err := m.client.Models.GenerateContent(ctx, m.spec.Model, contents, m.config(system, calls >= m.opt.maxCalls()))
 		if err != nil {
 			return reply, err
 		}
@@ -114,10 +114,15 @@ func (m *geminiMind) Speak(ctx context.Context, system string, turns []Turn) (Re
 				key = "error"
 			}
 			results = append(results, &genai.Part{FunctionResponse: &genai.FunctionResponse{
-				ID: p.FunctionCall.ID, Name: p.FunctionCall.Name, Response: map[string]any{key: out},
+				ID: p.FunctionCall.ID, Name: p.FunctionCall.Name, Response: map[string]any{key: spent(out, calls, m.opt)},
 			}})
 		}
 		if len(results) == 0 {
+			if strings.TrimSpace(resp.Text()) == "" && cand.FinishReason == genai.FinishReasonStop && !nudged {
+				nudged = true
+				exchange = append(exchange, genai.NewContentFromText(nudge, genai.RoleUser))
+				continue
+			}
 			reply.Text, reply.Stop = resp.Text(), string(cand.FinishReason)
 			reply.Raw, err = json.Marshal(exchange)
 			return reply, err

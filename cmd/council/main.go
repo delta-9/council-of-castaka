@@ -55,7 +55,8 @@ type config struct {
 	Sessions     string                  `json:"sessions"`
 	Rounds       int                     `json:"rounds"`
 	Words        int                     `json:"words"`
-	MaxTokens    int64                   `json:"maxTokens"`
+	MaxTokens    int64                   `json:"maxTokens"` // a seat's maxTokens overrides it
+	MaxCalls     int                     `json:"maxCalls"`  // local tool calls per turn; 0 means the default
 	SearchServer searchServer            `json:"searchServer"`
 	Rosters      map[string][]minds.Spec `json:"rosters"`
 	Prices       map[string]price        `json:"prices"` // $ per 1M tokens
@@ -138,10 +139,6 @@ func run(fl flags) error {
 		fmt.Printf("%s, %d bytes (about %d tokens)\n\n%s\n", time.Since(start).Round(time.Millisecond), len(out), len(out)/4, out)
 		return nil
 	}
-	roster, ok := cfg.Rosters[fl.roster]
-	if !ok {
-		return fmt.Errorf("no roster %q in the config", fl.roster)
-	}
 	rounds := fl.rounds
 	if rounds <= 0 {
 		rounds = cfg.Rounds
@@ -156,7 +153,7 @@ func run(fl flags) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	sess, err := openSession(dir, cfg, roster)
+	sess, err := openSession(dir, cfg, fl.roster)
 	if err != nil {
 		return err
 	}
@@ -187,7 +184,13 @@ func run(fl flags) error {
 		if spec.Provider != "fake" && key == "" {
 			return fmt.Errorf("seat %s: no %s in %s or the environment", spec.Seat, cfg.Keys[spec.Provider], cfg.EnvFile)
 		}
-		mind, err := minds.New(spec, key, minds.Options{MaxTokens: cfg.MaxTokens, Session: filepath.Base(dir), Tools: kit, Notify: c.notifier(spec.Seat)})
+		maxTokens := cfg.MaxTokens
+		if spec.MaxTokens > 0 {
+			maxTokens = spec.MaxTokens
+		}
+		mind, err := minds.New(spec, key, minds.Options{
+			MaxTokens: maxTokens, MaxCalls: cfg.MaxCalls, Session: filepath.Base(dir), Tools: kit, Notify: c.notifier(spec.Seat),
+		})
 		if err != nil {
 			return err
 		}
@@ -235,9 +238,10 @@ func loadConfig(path string) (config, error) {
 	return cfg, nil
 }
 
-// openSession reopens the session in dir, or starts one there from roster,
-// reading the repository the council was started in.
-func openSession(dir string, cfg config, roster []minds.Spec) (session, error) {
+// openSession reopens the session in dir with its own roster, or starts one
+// there from the named roster, reading the repository the council was
+// started in.
+func openSession(dir string, cfg config, name string) (session, error) {
 	path := filepath.Join(dir, "session.json")
 	var s session
 	if b, err := os.ReadFile(path); err == nil {
@@ -250,6 +254,10 @@ func openSession(dir string, cfg config, roster []minds.Spec) (session, error) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "systems.json")); err == nil {
 		return s, fmt.Errorf("%s was started before the minds had tools; start a new session", dir)
+	}
+	roster, ok := cfg.Rosters[name]
+	if !ok {
+		return s, fmt.Errorf("no roster %q in the config", name)
 	}
 	s = session{Created: time.Now().Format("2006-01-02"), Roster: roster, Systems: map[string]string{}}
 	if cwd, err := os.Getwd(); err == nil {

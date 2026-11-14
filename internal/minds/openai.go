@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -66,7 +67,7 @@ func (m *openaiMind) Speak(ctx context.Context, system string, turns []Turn) (Re
 	}
 	var reply Reply
 	var exchange []json.RawMessage
-	calls := 0
+	calls, nudged := 0, false
 	for step := 0; step < maxSteps; step++ {
 		input := append(responses.ResponseInputParam(nil), history...)
 		for _, item := range exchange {
@@ -83,7 +84,7 @@ func (m *openaiMind) Speak(ctx context.Context, system string, turns []Turn) (Re
 			PromptCacheKey:  openai.String(m.opt.Session + "/" + m.spec.Seat),
 			Tools:           m.tools,
 		}
-		if calls >= MaxCalls {
+		if calls >= m.opt.maxCalls() {
 			params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptionsNone)}
 		}
 		resp, err := m.client.Responses.New(ctx, params)
@@ -125,7 +126,7 @@ func (m *openaiMind) Speak(ctx context.Context, system string, turns []Turn) (Re
 			case "function_call":
 				calls++
 				result, _ := call(ctx, m.opt, &reply, item.Name, json.RawMessage(item.Arguments))
-				b, err := json.Marshal(map[string]string{"type": "function_call_output", "call_id": item.CallID, "output": result})
+				b, err := json.Marshal(map[string]string{"type": "function_call_output", "call_id": item.CallID, "output": spent(result, calls, m.opt)})
 				if err != nil {
 					return reply, err
 				}
@@ -133,6 +134,15 @@ func (m *openaiMind) Speak(ctx context.Context, system string, turns []Turn) (Re
 			}
 		}
 		if len(results) == 0 {
+			if strings.TrimSpace(resp.OutputText()) == "" && resp.Status == responses.ResponseStatusCompleted && !nudged {
+				nudged = true
+				b, err := json.Marshal(map[string]string{"role": "user", "content": nudge})
+				if err != nil {
+					return reply, err
+				}
+				exchange = append(exchange, b)
+				continue
+			}
 			reply.Text, reply.Stop = resp.OutputText(), string(resp.Status)
 			if resp.Status == responses.ResponseStatusIncomplete {
 				reply.Stop = "incomplete " + resp.IncompleteDetails.Reason
