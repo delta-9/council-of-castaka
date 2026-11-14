@@ -394,3 +394,18 @@ Neither will you be.
 ---
 
 *The council does not reconvene on the same matter. What is decided here stands.*
+
+## Council of minds
+
+A second council, for technical matters: models from several labs, as themselves (Opus 5.5, Fable 5.2, Gemini 4 Hydrogen and Carbon, GPT-6 Astra), called with API keys. This one reconvenes: every message, the chair's or a mind's, is queued into the next turn of every other mind. Design, rehearsal and status: [docs/council.md](docs/council.md).
+
+```sh
+go build -o ./council ./cmd/council
+./council                        # open a session; /help lists the commands
+./council -roster rehearsal      # the same requests on cheaper models and lower effort
+./council -fake                  # every seat answers with what it was shown, for free
+./council -q -m "matter"         # no console: run the rounds, print the transcript path
+./council -resume ~/.council/sessions/<session>
+```
+
+Keys are read by name from the env file named in `council.json`. Sessions live in `~/.council/sessions/<session>/`: `log.jsonl` (the whole state), `systems.json` (each seat's system prompt, fixed for the session) and `transcript.md`.
