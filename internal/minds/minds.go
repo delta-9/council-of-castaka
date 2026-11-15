@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // Turn is one message of a mind's view of the floor. An assistant turn may
@@ -45,7 +46,8 @@ type Reply struct {
 	Served string // the model that answered, as the provider reports it
 	Stop   string // the provider's stop or finish reason
 	Usage  Usage
-	Calls  []string // the tools called this turn, described for the chair
+	Calls  []string      // the tools called this turn, described for the chair
+	Quiet  time.Duration // the longest the connection stayed silent, on streamed requests
 }
 
 // Mind speaks one turn, given its system prompt and its view of the floor. On

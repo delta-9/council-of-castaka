@@ -17,6 +17,33 @@ func (f failing) Speak(ctx context.Context, system string, turns []minds.Turn) (
 	return minds.Reply{Usage: f.usage}, errors.New("stalled mid-turn")
 }
 
+// counting fails every turn and counts its turns.
+type counting struct{ turns *atomic.Int32 }
+
+func (c counting) Speak(ctx context.Context, system string, turns []minds.Turn) (minds.Reply, error) {
+	c.turns.Add(1)
+	return minds.Reply{}, errors.New("down")
+}
+
+// TestFailedTurnRunsAgain checks that a failed turn leaves its seat's queue
+// intact, so the next round runs the whole turn again.
+func TestFailedTurnRunsAgain(t *testing.T) {
+	log, err := OpenLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	var n atomic.Int32
+	f := New(log, []*Seat{NewSeat("opus", "m", "", counting{turns: &n})}, 2)
+	if _, err := f.Post("hello"); err != nil {
+		t.Fatal(err)
+	}
+	f.Wait()
+	if n.Load() != 2 {
+		t.Fatalf("the failing seat spoke %d times in two rounds, want 2", n.Load())
+	}
+}
+
 // listening answers every turn and counts them.
 type listening struct{ turns *atomic.Int32 }
 
@@ -45,6 +72,35 @@ func TestMentionByName(t *testing.T) {
 	f.Wait()
 	if hurl.Load() != 1 || noren.Load() != 0 {
 		t.Fatalf("Hûrl spoke %d times and Noren %d after @hurl, want 1 and 0", hurl.Load(), noren.Load())
+	}
+}
+
+// blocking waits until the chair stops the round.
+type blocking struct{ started chan struct{} }
+
+func (b blocking) Speak(ctx context.Context, system string, turns []minds.Turn) (minds.Reply, error) {
+	close(b.started)
+	<-ctx.Done()
+	return minds.Reply{Usage: minds.Usage{Input: 3}}, ctx.Err()
+}
+
+// TestStopLeavesNoTrace checks that a turn the chair stops leaves no entry.
+func TestStopLeavesNoTrace(t *testing.T) {
+	log, err := OpenLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	b := blocking{started: make(chan struct{})}
+	f := New(log, []*Seat{NewSeat("opus", "m", "", b)}, 1)
+	if _, err := f.Post("hello"); err != nil {
+		t.Fatal(err)
+	}
+	<-b.started
+	f.Stop()
+	f.Wait()
+	if entries := log.Snapshot(); len(entries) != 1 {
+		t.Fatalf("entries after a stop: %+v, want only the chair's message", entries)
 	}
 }
 

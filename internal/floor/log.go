@@ -16,19 +16,22 @@ import (
 
 // Entry is one line of log.jsonl.
 type Entry struct {
-	Seq    int             `json:"seq"`
-	TS     time.Time       `json:"ts"`
-	From   string          `json:"from"` // "chair" or a seat
-	Kind   string          `json:"kind"` // "msg", "pass" or "error"
-	Text   string          `json:"text,omitempty"`
-	Seen   int             `json:"seen,omitempty"` // a seat's turn: the last seq it had read
-	Round  int             `json:"round,omitempty"`
-	Model  string          `json:"model,omitempty"`  // the seat's configured model
-	Served string          `json:"served,omitempty"` // the model that answered, as reported
-	Ms     int64           `json:"ms,omitempty"`
-	Usage  *minds.Usage    `json:"usage,omitempty"`
-	Calls  []string        `json:"calls,omitempty"` // the tools the turn called, described
-	Raw    json.RawMessage `json:"raw,omitempty"`   // the native exchange, for replay
+	Seq    int          `json:"seq"`
+	TS     time.Time    `json:"ts"`
+	From   string       `json:"from"` // "chair" or a seat
+	Kind   string       `json:"kind"` // "msg", "pass" or "error"
+	Text   string       `json:"text,omitempty"`
+	Seen   int          `json:"seen,omitempty"` // a seat's turn: the last seq it had read
+	Round  int          `json:"round,omitempty"`
+	Model  string       `json:"model,omitempty"`  // the seat's configured model
+	Served string       `json:"served,omitempty"` // the model that answered, as reported
+	Ms     int64        `json:"ms,omitempty"`
+	Usage  *minds.Usage `json:"usage,omitempty"`
+	Calls  []string     `json:"calls,omitempty"` // the tools the turn called, described
+	// QuietMs is the longest the connection stayed silent during the turn, on
+	// streamed requests: the figure the idle limit is calibrated on.
+	QuietMs int64           `json:"quietMs,omitempty"`
+	Raw     json.RawMessage `json:"raw,omitempty"` // the native exchange, for replay
 }
 
 // Log is the session's append-only record. An entry is written to disk before

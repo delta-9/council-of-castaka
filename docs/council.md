@@ -174,10 +174,16 @@ Running each mind through its own agent CLI (Claude Code, Codex, a Gemini CLI) i
 
 - **Anthropic** (Opus 5.5, Fable 5.2), `minds/anthropic.go`:
   - Thinking is always on. `Thinking` stays unset and `OutputConfig.Effort` sets the depth. Sampling parameters and prefill return 400.
-  - Requests are not streamed: `maxTokens` is 16000 and the request timeout 15 minutes. The council's own report on this question is under Open below.
-  - Top-level `CacheControl` caches the prefix.
+  - Each request is streamed and built back into the `BetaMessage` the tool loop expects:
+    - A stream that ends without `message_stop` fails the step, so a cut turn is never stored. Reading stops at `message_stop`, so what the connection does afterwards cannot fail a finished answer.
+    - A watchdog at the transport fails a request after 120 s without a byte, headers and pings included. It cancels a context of its own, never the chair's. The longest silence measured on a high-effort turn is 30 s (rehearsal 4), and each turn logs its own as `quietMs`.
+    - Bounds: 15 minutes per request, its retries included, and 30 per turn, tool calls included. The client has no request timeout, which would cut long healthy streams.
+    - HTTP/2 health checks ping a connection silent for 45 s and close it after 15 s without an answer, so a dead connection leaves the pool within a minute.
+    - The SDK retries a request that got no response or a retryable status, twice. A stream the API fails partway with `overloaded_error` or `api_error` runs once more in place, 2 s later, and the console says so: that costs less than the next round rerunning every step of the turn, searches included. The chair chose this after rehearsal 4, over no retry and over Fable's retry only for steps that ran no search. Any other failure, or a second one, fails the turn, and the next round reruns it.
+    - Usage counts once per request, failed ones included: input from `message_start`, output and billed searches from the last `message_delta`.
+  - `maxTokens` is 16000. Top-level `CacheControl` caches the prefix.
   - A turn's exchange is replayed message by message with `param.Override`; each response becomes its message through `BetaMessage.ToParam()`, thinking blocks and signatures included. After a mid-output fallback, the reasoning blocks before the last fallback block are left out, as the fallback rules require.
-  - `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). A turn that another model rescued is labelled with that model. A refusal that survives the fallback is an error you see, and the seat sits out the round.
+  - `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`). A turn that another model rescued is labelled and priced as that model, which the SDK's accumulator takes from the last fallback block. A refusal that survives the fallback is an error you see, and the seat sits out the round.
 - **Gemini** (Hydrogen, Carbon), `minds/gemini.go`:
   - `generateContent`, with the thinking level set per seat (the SDK's enum is upper case, so effort is upper-cased). The output cap covers thinking and answer together.
   - Function results go back as `functionResponse` parts. Server-side search steps come back as signed `toolCall`/`toolResponse` parts and are replayed with the rest; the Go SDK's `Part` keeps them through a save and reload.
@@ -234,6 +240,20 @@ Session `~/.council/sessions/2026-11-14-minds`, the `minds` roster at high effor
 
 A cap check afterwards (`maxCalls` 2, one round, $0.25) had Opus, Fable, Luna and the real Carbon each reach the budget and then answer; Carbon took its 32,768-token budget. The nudge did not fire, so that path has not yet run against a provider.
 
+### 4. Streaming, reviewed by the council, 2026-11-14
+
+Session `~/.council/sessions/2026-11-14-streaming`: Opus and Fable at high effort, on the newly streamed adapter, reviewing that very change. Two rounds, then `/fold opus`. Round 1 took 3.4 minutes, round 2 37 s and the fold 83 s. No turn failed.
+- **Replay:** Fable accepted its streamed turns replayed in round 2, and Opus its own in rounds 2 and 3.
+- **Silence on the wire:** 30.0 s at most, in round 1 for both seats (29,999 and 30,008 ms), and 14 to 15 s after that. The 120 s idle limit has a 4× margin, and the API seems to send something every 30 s.
+- **Tools:** in round 1, Opus made 9 calls and 5 Anthropic searches, and Fable 19 calls, searching through MiniMax.
+- **The review:** Opus's 1,680-word report raised three bugs. Two were real, and their fixes are pinned by tests that fail on the old code:
+  - A finished answer could fail if the connection lingered after `message_stop`.
+  - Slow headers ate the body's idle window, and the silence figure missed both the header wait and the gap a stall cut.
+  - Not a bug: the served model after a mid-output fallback. SDK v2.9.0 already relabels it, and a test now pins that.
+- **Out of date:** neither seat could read v2.9.0, so the report took a stream's `error` event for a plain string. It comes back as a typed `*anthropic.Error`, which is what lets the retry pick its error types.
+- **Test gaps from the report, now closed:** replayed tool inputs, the search query in the call reports, billed searches (the SDK fix it worried about is in v2.9.0), the retry count before headers, and a turn-limit case that could flake. `go test -race -count=20` passes.
+- **Cost:** $2.22: Fable $1.43, Opus $0.79.
+
 ## Cost shape
 
 Each turn rereads the transcript, and caching makes that cheap. So thinking, output and freshly written context (tool results, search content) make up most of the bill.
@@ -244,7 +264,7 @@ Trust `/cost`, which is computed from each turn's usage and the prices in `counc
 
 ## Code shape
 
-Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 2,400 lines with comments, plus 242 lines of tests:
+Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 2,700 lines with comments, plus 810 lines of tests:
 - `internal/floor`: the log, `View`, rounds, the charter, the transcript.
 - `internal/minds`: one file per provider, each with its tool loop, plus a `fake` mind that echoes what it received and reads the last commit.
 - `internal/tools`: the repository tools behind the git guard, and the MCP client.
@@ -254,7 +274,8 @@ Go, in the Castaka module: one more static binary next to the Metabarons, whose 
 Tests, each catching one regression:
 - `view_test.go`: a mind missing a message or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
 - `tools_test.go`: a mind reading something git does not track, or a tool writing a file.
-- `floor_test.go`: a failed turn dropping what its completed steps cost from `/cost`, a mention by name reaching the wrong seat.
+- `floor_test.go`: a failed turn dropping its cost from `/cost` or losing its queue, a cancelled turn leaving an entry, a mention by name reaching the wrong seat.
+- `anthropic_test.go`, on SSE scripts served from an `httptest` server: a cut or stalled stream stored as a turn, a finished answer failed after `message_stop`, slow headers stalling the body, a streamed turn replayed differently from a buffered one, a fallback turn priced as the model that declined, a transient mid-stream error not retried once in place or any other failure retried, lost usage or searches, a tool call reported before its input arrived.
 
 ## Phases
 
@@ -262,22 +283,12 @@ Tests, each catching one regression:
 2. Providers and the first rehearsal. Done.
 3. The real minds: `-roster minds` on a real pickle. Done in rehearsal 3; its two round-1 failures are fixed.
 4. Tools, web search and `/fold`. Done; rehearsal 2.
-5. Streaming the Anthropic requests, tests first. Next, if wanted (see Open).
+5. Streaming the Anthropic requests, tests first. Done, as rehearsals 2 and 3 designed it; rehearsal 4 reviewed it, and its findings are fixed.
 
-## Open, from the council's own reports
+## Open
 
-Both reports, from rehearsal 2 and from the real minds checking it in rehearsal 3, say to stream the Anthropic requests, for liveness. One stalled connection holds the whole round at `floor.go`'s `wg.Wait()`. The second report's version of the change, in `anthropic.go`:
-- **Stream and accumulate.** Each step is streamed and built back into the same `BetaMessage` before the rest of `Speak` sees it. A stream that ends without `message_stop` fails the step. Otherwise it would be stored as a good turn, and Fable's history check would reject every later turn of that seat.
-- **A watchdog at the transport** counts bytes received, pings included, from the start of the request, so the wait before headers is covered too. It cancels a child context, never the chair's, because the floor drops the turns the chair cancelled.
-- **Bounds:** 15 minutes per step and 30 per turn. Today nothing bounds a turn: 40 steps of 15 minutes is 10 hours.
-- **Usage** is recorded once per request, success or failure. A failed stream's output tokens can't be known, since they arrive only in `message_delta`.
-- **No retry** of a step that fails mid-stream: 4 to 1, Fable dissenting. The next round reruns the whole turn, tool calls included.
-- **The idle limit** starts at 120 s and is calibrated on a high-effort turn. Thinking is probably silent on the wire, and pings have no promised schedule.
-- **Tests first**, on recorded SSE fixtures replayed from an `httptest.Server`: truncation, ping-only traffic, silence before and after headers, a mid-stream error, cancellation by the chair, and `pause_turn`.
-
-Fixed already: a failed turn keeps the cost of its completed steps (`floor_test.go`).
-
-Open for the chair: should `/stop` keep the cost of the turns it cancels? Today they leave no trace.
+- Should `/stop` keep the cost of the turns it cancels? Today they leave no trace.
+- Not run yet: the HTTP/2 health check (the fake API speaks HTTP/1.1), and the empty-reply nudge against a provider.
 
 ## Later, only if v1 earns it
 
