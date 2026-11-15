@@ -1,6 +1,6 @@
 # The council in the rawpixel GUI
 
-*Planned 2026-11-16; phase 1, the council's side, built the same day. A Council screen in the rawpixel GUI (`packages/rawpixel-cli/gui` in rawpixel-services), for any colleague with their own API keys: debates on a matter, and pull request reviews posted on GitHub.*
+*Planned 2026-11-16; phase 1, the council's side, and phase 2, the GUI's, built the same day. A Council screen in the rawpixel GUI (`packages/rawpixel-cli/gui` in rawpixel-services), for any colleague with their own API keys: debates on a matter, and pull request reviews posted on GitHub.*
 
 ## Goal
 
@@ -9,7 +9,7 @@
 
 ## Getting the council
 
-- The council stays in Castaka. rawpixel-services pins a tagged release and builds it with its own Go toolchain (`docs/development/go-toolchain.md` there), the way it pins golangci-lint: `go install github.com/delta-9/council-of-castaka/cmd/council@<tag>`. Its install step sets it up, and nobody clones Castaka.
+- The council stays in Castaka. rawpixel-services pins a tagged release and builds it with its own Go toolchain (`docs/development/go-toolchain.md` there), the way it pins golangci-lint: `go install github.com/delta-9/council-of-castaka/cmd/council@<tag>`. `bun run setup:council` builds it into the Go store every checkout shares, and the Council screen offers that build while it is missing, so nobody clones Castaka. `setup:go` leaves it out: only those who open the screen need it.
 - The binary carries a default config: the seats, models, prices and search server. So an install needs no `council.json`.
 - `RAWPIXEL_COUNCIL_COMMAND` points the GUI at another build, the chair's own for example.
 
@@ -28,6 +28,7 @@
   - `council keys check` makes one call per provider that costs nothing, its models listing, and says which keys work. MiniMax has no such listing, so its key is tried with one search through the MCP server, in the plan.
   - `council keys import <file>` copies the four keys from an env file, by the names the config gives them, without printing them. The chair runs it once on the hermes `.env`, and the config then stops pointing there.
 - **The GUI never reads `keys.env`** and never gets a value back. Its key form is write-only, and it shows each key as set, missing or refused.
+- **A council the GUI starts gets no key variable.** The GUI's own environment holds a team Anthropic key, and a variable wins over `keys.env`, so the GUI removes the key variables, the built-in names and the config's, before it starts a council: what the form saved is what the council spends.
 - **The gate:** the screen shows its content only once all four keys are set and accepted. Until then it shows the key form.
 
 ## The roster
@@ -52,6 +53,7 @@
   - `running.json` names the council's process while the session runs.
   
   So a GUI restart costs no round: the screen reattaches and reads the events from where it left off.
+- **Starting one:** the GUI picks the session's folder and starts `council --detached -resume <folder>` there. A session whose roster differs from the default gets `-config <folder>/roster.json -roster gui`. A debate's matter goes in through the pipe once the session event is out.
 - **Sessions** are listed from `~/.council/sessions`: the matter or the pull request, running or ended, its rounds and its cost.
 
 ## The screen
@@ -65,5 +67,5 @@
 ## Phases
 
 1. **The council (Castaka):** the built-in defaults and `~/.council`; `keys`, `options` and `roster`; `--events` with the attach (`--detached`). Then a tagged release. Built 2026-11-16 and checked: the tests, among them one that starts the real binary detached, posts through its pipe and reads its events; and on the chair's own setup, `council keys` and `keys check` (all four keys accepted), `options`, `roster`, and Gemini at xhigh.
-2. **rawpixel-services:** the pinned install, the sidecar module (`server/council.ts`), and the screen.
+2. **rawpixel-services:** the pinned install, the sidecar module (`server/council.ts`), and the screen. Built 2026-11-16 and checked: the sidecar's tests, among them one that runs the pinned council with fake minds through a session folder until `/quit`; and in the chair's GUI, a debate between two seats at low effort with a fold and its report, which kept running through a GUI restart and answered a message posted after it, and the review form naming the `gh` account. A review run through the screen is left to phase 3.
 3. **A test as a colleague:** a fresh home folder, the keys entered through the form, a debate, and a dry-run review.
