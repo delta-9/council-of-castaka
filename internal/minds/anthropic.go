@@ -22,7 +22,7 @@ var (
 // limits bound an Anthropic turn. idle is the longest the connection may stay
 // silent, pings included; step bounds one request with its SDK retries; turn
 // bounds the whole loop, tool calls included; retry is the wait before a step
-// the API failed partway runs again.
+// that failed partway runs again.
 type limits struct{ idle, step, turn, retry time.Duration }
 
 var anthropicLimits = limits{idle: 120 * time.Second, step: 15 * time.Minute, turn: 30 * time.Minute, retry: 2 * time.Second}
@@ -71,7 +71,7 @@ func anthropicWith(spec Spec, key string, opt Options, l limits, extra ...option
 // Speak runs the turn with the seat's effort, automatic prompt caching,
 // server-side fallbacks for refusals and the seat's tools, looping on tool
 // calls until the mind answers. Each request is streamed (see step), and a
-// step the API fails partway while overloaded or erring runs once more.
+// step whose stream fails partway runs once more (see retryable).
 // Thinking stays unset: it is always on for Opus 5.5 and Fable 5.2, and
 // effort sets its depth. The tool list never changes within a session, since
 // Fable's history check compares it.
@@ -105,11 +105,11 @@ func (m *anthropicMind) Speak(ctx context.Context, system string, turns []Turn) 
 			params.ToolChoice = anthropic.BetaToolChoiceUnionParam{OfNone: &anthropic.BetaToolChoiceNoneParam{}}
 		}
 		resp, err := m.step(ctx, params, &reply)
-		if kind := transient(err); kind != "" {
+		if why := retryable(err); why != "" {
 			// One more try of this step costs less than the next round
 			// rerunning every step of the turn, searches included.
 			if m.opt.Notify != nil {
-				m.opt.Notify("retrying after " + string(kind))
+				m.opt.Notify("retrying after " + why)
 			}
 			if err = wait(ctx, m.limits.retry); err == nil {
 				resp, err = m.step(ctx, params, &reply)
@@ -211,24 +211,47 @@ func (m *anthropicMind) step(ctx context.Context, params anthropic.BetaMessageNe
 		// Say why: a time limit of the step or the turn rather than the error
 		// the cut read produced. A stop by the chair stays a cancellation.
 		if cause := context.Cause(ctx); cause == errStepTimeout || cause == errTurnTimeout || errors.Is(cause, context.Canceled) {
-			err = cause
+			return nil, cause
+		}
+		// A stream that started and then broke, rather than an error the API
+		// sent: Speak may run the step once more.
+		var apiErr *anthropic.Error
+		if msg.ID != "" && !errors.As(err, &apiErr) {
+			err = cutError{err}
 		}
 		return nil, err
 	}
 	return &msg, nil
 }
 
-// transient names the error a stream ended on when the API failed partway
-// while overloaded or erring: the one failure a step retries, once and in
-// place. Any other error gives "", and so does an error status before the
-// stream, which the SDK has already retried.
-func transient(err error) anthropic.ErrorType {
+// cutError is a stream that started and then broke: its connection lost,
+// stalled or cut short.
+type cutError struct{ err error }
+
+func (e cutError) Error() string { return e.err.Error() }
+func (e cutError) Unwrap() error { return e.err }
+
+// retryable says why a step failed partway when the step is worth running
+// once more, in place: the API overloaded or erring mid-stream, or a stream
+// that started and then broke. Anything else gives "": an error the API sends
+// for a bad request, the chair's stop, the time limits, and a failure before
+// the stream started, which the SDK has already retried.
+func retryable(err error) string {
 	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusOK {
-		switch t := apiErr.Type(); t {
-		case anthropic.ErrorTypeOverloadedError, anthropic.ErrorTypeAPIError:
-			return t
+	var cut cutError
+	switch {
+	case errors.As(err, &apiErr):
+		if t := apiErr.Type(); apiErr.StatusCode == http.StatusOK && (t == anthropic.ErrorTypeOverloadedError || t == anthropic.ErrorTypeAPIError) {
+			return string(t)
 		}
+	case errors.As(err, &cut):
+		switch {
+		case errors.Is(err, errStalled):
+			return "a stall"
+		case errors.Is(err, errTruncated):
+			return "a stream cut short"
+		}
+		return "a lost connection"
 	}
 	return ""
 }

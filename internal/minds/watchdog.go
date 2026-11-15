@@ -47,7 +47,7 @@ func (w watchdog) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // watched is a response body that pushes the stall timer back on every read
 // that returns data, and notes the longest gap between such reads, the one a
-// stall cut short included.
+// failure cut short included.
 type watched struct {
 	io.ReadCloser
 	ctx    context.Context
@@ -66,9 +66,13 @@ func (b *watched) Read(p []byte) (int, error) {
 		b.last = now
 		b.timer.Reset(b.idle)
 	}
-	if err != nil && context.Cause(b.ctx) == errStalled {
+	if err != nil {
+		// Whatever ended the read (the stall timer, a lost connection, the
+		// chair), the gap before it was silence too.
 		b.quiet.note(time.Since(b.last))
-		err = errStalled
+		if context.Cause(b.ctx) == errStalled {
+			err = errStalled
+		}
 	}
 	return n, err
 }
