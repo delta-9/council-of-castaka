@@ -58,6 +58,9 @@ type Floor struct {
 	// OnRound and OnEntry report progress, possibly from several goroutines.
 	OnRound func(round int, seats []string)
 	OnEntry func(Entry)
+	// OnQuiet reports that the rounds ended: the budget is spent, or no seat
+	// has anything new to read. It runs once the floor is free, so it may post.
+	OnQuiet func()
 
 	names map[string]string // seat ID → name, for the views
 
@@ -217,6 +220,9 @@ func (f *Floor) loop() {
 			f.budget, f.only, f.running, f.cancel = 0, nil, false, nil
 			close(f.idle)
 			f.mu.Unlock()
+			if f.OnQuiet != nil {
+				f.OnQuiet()
+			}
 			return
 		}
 		f.budget--

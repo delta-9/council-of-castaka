@@ -106,6 +106,7 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 ## Chair's console
 
 - `council` opens a session and `council -resume <session>` reopens one with the roster it started with. `-roster rehearsal` picks the cheap models for a new session, and `-fake` makes every seat answer with what it was shown, for free.
+- `council [-q] --pr 123 [--dry-run]` reviews a pull request and posts the review on it (Pull request reviews, below).
 - `council -q -m "…" [-fold opus]` runs the rounds without a console and prints the transcript's path, or folds and prints the report's path. It can be called from Claude Code or by an agent.
 - `council -search "…"` runs one search through the MiniMax MCP server and prints what came back, with its size.
 - A typed line is posted at once and queued into every mind's next turn, even mid-round. `"""` on a line of its own starts or ends a multi-line message.
@@ -169,6 +170,19 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 ### Considered and dropped
 
 Running each mind through its own agent CLI (Claude Code, Codex, a Gemini CLI) in read-only mode. Their tools would come free, but each brings its own sandbox rules, a large coding-agent prompt on every turn, and session state outside the floor. That loses the shared log, replay and caching the rehearsals proved.
+
+## Pull request reviews (`--pr`)
+
+`council --pr 123`, or `council -q --pr 123`, has the council review pull request 123 of the repository it runs in, and posts the review on it.
+
+- **Setup.** It reads the pull request with `gh` (title, description, base, head) and its diff. When the base or head commit is missing locally, it fetches it by its SHA: no branch is created and the working tree is untouched. The head is pinned when the session starts, so the session reviews that commit and the inline comments land on it.
+- **The matter.** The opening message asks for a review, with the title, the description and the diff (the file list instead, above 60 KB). `-m` adds the chair's focus.
+- **The charter** adds a paragraph: every reply is posted on the pull request under the chair's account, so cite `file:line` at the head and talk about the code, never the people. In a review session `read_file` takes a `rev`, so its line numbers are the head's. Other sessions keep the tool as it was, since Fable's history check compares the tool list.
+- **Comments.** Each mind's message becomes a comment as it lands, opening with "I am Firfïn." (its name); the header comment lists each name with its model. The chair's messages are posted too, headed "Chair". The opening is posted as a short header, without the diff. Passes, errors and the fold request stay in the console. `pr.json` in the session folder records each comment posted, so a resumed session posts only what is missing.
+- **The trigger.** The fold starts on its own when the floor goes quiet: after a round in which every seat passes, or when the round budget is spent (3 in a review, unless `-n` says otherwise). The folding seat is `-fold`, by default the roster's first seat (Opus). A chair message grants new rounds, and the fold waits for quiet again. `/stop` holds the fold until the next message, and `/fold` folds at once. One review per session: once it is posted, the session ends.
+- **The review.** The fold is posted as one review of type comment, never an approval or a request for changes. Its body is the report. Its inline comments come from a closing `inline` block in the report (a JSON array of path, line and body), each checked against the diff. A comment on a line the diff does not show goes into the body as `file:line` instead. If GitHub still refuses the inline comments, the review goes out with all of them in the body.
+- **`--dry-run`** writes the comments and the review into the session's `github/` folder instead of posting.
+- **Trust.** The pull request's text reaches every mind and steers what gets posted under the chair's name. Review pull requests you trust, and dry-run the others.
 
 ## Provider notes (knowledge, not gates)
 
@@ -254,6 +268,21 @@ Session `~/.council/sessions/2026-11-14-streaming`: Opus and Fable at high effor
 - **Test gaps from the report, now closed:** replayed tool inputs, the search query in the call reports, billed searches (the SDK fix it worried about is in v2.9.0), the retry count before headers, and a turn-limit case that could flake. `go test -race -count=20` passes.
 - **Cost:** $2.22: Fable $1.43, Opus $0.79.
 
+### 5. A pull request review, dry run, 2026-11-15
+
+`council -roster rehearsal -q --pr 3 --dry-run` in this repository: the council reviewed its own PR 3, the broken-stream retry. Session `2026-11-15-142606`, kept in a scratch folder.
+- **Flow:** three rounds, then the floor went quiet and Opus folded on its own. Of 18 entries, 12 comments were written for posting: the header and 11 messages. The four passes, the fold request and the fold stayed off the pull request.
+- **The review:** 2,241 words, verdict "merge after fixes". Its inline block parsed, and all 9 inline comments sat on lines of the diff.
+- **Its findings** on PR 3 are under Open.
+- **Cost:** $1.30: Fable $0.68, Opus $0.49, the rest $0.14.
+
+### 6. The first live review, 2026-11-15
+
+`council --pr 3` with the `minds` roster (Opus, Fable and Astra at max effort, the Gemini seats at high), watched in Ghostty. Session `~/.council/sessions/2026-11-15-143317`.
+- **Flow:** three rounds with no pass, so the budget ended the debate. Then Opus folded on its own: 653 s and 74.5K output tokens. 16 comments went up (the header and 15 messages), then the review with 10 inline comments, all on lines of the diff. 34 minutes in all.
+- **Headers:** the chair asked for "I am Firfïn." in place of "**Firfïn** · gpt-6-astra · round 1". The 15 posted comments were rewritten through the API, and the code now writes the new header. The review's header dropped its model the same way: "folded by Morkaï".
+- **Cost:** $16.26: Fable $6.76, Opus $5.76 (the fold alone $2.50), Carbon $1.65, Astra $1.62, Hydrogen $0.47.
+
 ## Cost shape
 
 Each turn rereads the transcript, and caching makes that cheap. So thinking, output and freshly written context (tool results, search content) make up most of the bill.
@@ -264,17 +293,19 @@ Trust `/cost`, which is computed from each turn's usage and the prices in `counc
 
 ## Code shape
 
-Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 2,700 lines with comments, plus 810 lines of tests:
+Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 3,600 lines with comments, plus 1,160 lines of tests:
 - `internal/floor`: the log, `View`, rounds, the charter, the transcript.
 - `internal/minds`: one file per provider, each with its tool loop, plus a `fake` mind that echoes what it received and reads the last commit.
 - `internal/tools`: the repository tools behind the git guard, and the MCP client.
-- `cmd/council`: flags, sessions, the console, `/fold`, `/cost`.
+- `internal/pr`: a pull request read with `gh`, the lines its diff takes inline comments on, and the comments and review posted on it.
+- `cmd/council`: flags, sessions, the console, `/fold`, `/cost`, and the review session (`review.go`).
 - `council.json`: the rosters, the key file and its variable names, the search server, the defaults and the prices. No secrets.
 
 Tests, each catching one regression:
 - `view_test.go`: a mind missing a message or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
-- `tools_test.go`: a mind reading something git does not track, or a tool writing a file.
-- `floor_test.go`: a failed turn dropping its cost from `/cost` or losing its queue, a cancelled turn leaving an entry, a mention by name reaching the wrong seat.
+- `tools_test.go`: a mind reading something git does not track, or a tool writing a file; a review reading the working tree instead of the head.
+- `pr_test.go`: an inline comment on a line GitHub refuses (it refuses the whole review), a comment lost from the review, a message posted twice or again after a resume, a refused review not sent again without its inline comments, a dry run that posts, a head commit left unfetched.
+- `floor_test.go`: a failed turn dropping its cost from `/cost` or losing its queue, a cancelled turn leaving an entry, a mention by name reaching the wrong seat, the end of the rounds never reported (a review would never fold).
 - `anthropic_test.go`, on SSE scripts served from an `httptest` server: a cut or stalled stream stored as a turn, a finished answer failed after `message_stop`, slow headers stalling the body, a streamed turn replayed differently from a buffered one, a fallback turn priced as the model that declined, a step that failed partway not retried once, or a rejected request, a stop or a time limit retried, lost usage or searches, a tool call reported before its input arrived.
 
 ## Phases
@@ -284,9 +315,16 @@ Tests, each catching one regression:
 3. The real minds: `-roster minds` on a real pickle. Done in rehearsal 3; its two round-1 failures are fixed.
 4. Tools, web search and `/fold`. Done; rehearsal 2.
 5. Streaming the Anthropic requests, tests first. Done, as rehearsals 2 and 3 designed it; rehearsal 4 reviewed it, and its findings are fixed.
+6. Pull request reviews (`--pr`), tests first. Done; rehearsal 5 dry, rehearsal 6 live on PR 3.
 
 ## Open
 
+- From the reviews of PR 3 (rehearsal 5 dry, rehearsal 6 live, both "merge after fixes"; the live one is on the pull request), to fix in their own PR:
+  - A stream that fails with a malformed event (an `Accumulate` or JSON decode error) after `message_start` is retried in place and labelled "a lost connection". A deterministic failure costs a second try and still fails. Fix: leave those errors unwrapped, and call the fallback "a broken stream".
+  - `quietMs` now mixes the silence before a failure with healthy silence. A turn that recovered on its retry logs the dead connection's gap, so the log no longer gives the healthy figure the idle limit is calibrated on. Fix: keep the two apart.
+  - A retry that succeeds leaves no trace of the failure in `log.jsonl`.
+  - A stream that breaks after the response headers but before `message_start` is retried by neither the SDK nor the council.
+  - The timing-sensitive test case added for the retry needs wider margins.
 - Should `/stop` keep the cost of the turns it cancels? Today they leave no trace.
 - Not run yet: the empty-reply nudge against a provider, and the retry of a broken stream against the real API.
 

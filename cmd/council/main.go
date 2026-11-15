@@ -8,6 +8,7 @@
 //
 //	council [-roster minds|rehearsal] [-resume <session>] [-fake]
 //	council -q -m "matter" [-n rounds] [-fold seat]
+//	council [-q] --pr number [--dry-run] [-m focus] [-n rounds] [-fold seat]
 //	council -search "query"
 package main
 
@@ -30,6 +31,7 @@ import (
 
 	"github.com/delta-9/council-of-castaka/internal/floor"
 	"github.com/delta-9/council-of-castaka/internal/minds"
+	"github.com/delta-9/council-of-castaka/internal/pr"
 	"github.com/delta-9/council-of-castaka/internal/tools"
 )
 
@@ -71,6 +73,8 @@ type session struct {
 	Repo    string            `json:"repo,omitempty"`
 	Roster  []minds.Spec      `json:"roster"`
 	Systems map[string]string `json:"systems"`
+	PR      *pr.Info          `json:"pr,omitempty"`     // the pull request a review session reviews
+	DryRun  bool              `json:"dryRun,omitempty"` // a review that writes its posts to github/ instead
 }
 
 const foldPrompt = "Fold the council's debate into the final report for the chair, as a standalone Markdown document. " +
@@ -96,8 +100,8 @@ const help = `Type a line to post it; every mind reads it at its next turn.
 
 type flags struct {
 	config, roster, resume, matter, fold, search string
-	quiet, fake                                  bool
-	rounds                                       int
+	quiet, fake, dry                             bool
+	rounds, pr                                   int
 }
 
 func main() {
@@ -111,6 +115,8 @@ func main() {
 	flag.IntVar(&fl.rounds, "n", 0, "rounds granted to each chair message (default from the config)")
 	flag.BoolVar(&fl.fake, "fake", false, "every seat uses the fake mind, for free")
 	flag.StringVar(&fl.search, "search", "", "run one search through the MCP server and print the results")
+	flag.IntVar(&fl.pr, "pr", 0, "review this pull request of the repository the council runs in, posting each message and the review on it")
+	flag.BoolVar(&fl.dry, "dry-run", false, "with -pr: write the comments and the review into the session folder instead of posting them")
 	flag.Parse()
 	if err := run(fl); err != nil {
 		fmt.Fprintln(os.Stderr, "council:", err)
@@ -140,23 +146,47 @@ func run(fl flags) error {
 		fmt.Printf("%s, %d bytes (about %d tokens)\n\n%s\n", time.Since(start).Round(time.Millisecond), len(out), len(out)/4, out)
 		return nil
 	}
-	rounds := fl.rounds
-	if rounds <= 0 {
-		rounds = cfg.Rounds
-	}
-	if fl.quiet && fl.matter == "" {
-		return errors.New(`-q needs -m "matter"`)
-	}
 	dir := fl.resume
 	if dir == "" {
 		dir = filepath.Join(expand(cfg.Sessions), time.Now().Format("2006-01-02-150405"))
 	}
+	_, err = os.Stat(filepath.Join(dir, "session.json"))
+	fresh := os.IsNotExist(err)
+	var info *pr.Info
+	var diff string
+	if fl.pr > 0 && fresh {
+		i, d, err := prepareReview(fl.pr)
+		if err != nil {
+			return err
+		}
+		info, diff = &i, d
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	sess, err := openSession(dir, cfg, fl.roster)
+	sess, err := openSession(dir, cfg, fl.roster, info, fl.dry)
 	if err != nil {
 		return err
+	}
+	if info != nil {
+		if err := os.WriteFile(filepath.Join(dir, "pr.diff"), []byte(diff), 0o600); err != nil {
+			return err
+		}
+	}
+	switch {
+	case fl.pr > 0 && (sess.PR == nil || sess.PR.Number != fl.pr):
+		return fmt.Errorf("%s is not a review of pull request %d", dir, fl.pr)
+	case fl.dry && (sess.PR == nil || !sess.DryRun):
+		return errors.New("--dry-run goes with --pr when a review session starts; a session keeps the mode it started with")
+	case fl.quiet && fl.matter == "" && sess.PR == nil:
+		return errors.New(`-q needs -m "matter"`)
+	}
+	rounds := fl.rounds
+	if rounds <= 0 {
+		rounds = cfg.Rounds
+		if sess.PR != nil {
+			rounds = reviewRounds
+		}
 	}
 	log, err := floor.OpenLog(filepath.Join(dir, "log.jsonl"))
 	if err != nil {
@@ -171,7 +201,7 @@ func run(fl flags) error {
 	c := &console{cfg: cfg, sess: sess, dir: dir, quiet: fl.quiet, tty: term.IsTerminal(int(os.Stdout.Fd()))}
 	var seats []*floor.Seat
 	for _, spec := range sess.Roster {
-		kit := tools.Kit{Repo: repo}
+		kit := tools.Kit{Repo: repo, Rev: sess.PR != nil}
 		if spec.Search == "mcp" {
 			if searcher == nil {
 				return fmt.Errorf("seat %s searches through MCP, but the config has no searchServer", spec.Seat)
@@ -205,8 +235,33 @@ func run(fl flags) error {
 	}
 	c.f = floor.New(log, seats, rounds)
 	c.f.OnRound, c.f.OnEntry = c.onRound, c.onEntry
+	if sess.PR != nil {
+		focus := ""
+		if fresh {
+			focus = fl.matter
+		}
+		if err := c.startReview(fl.fold, focus, fresh); err != nil {
+			return err
+		}
+	}
 	if !fl.quiet {
 		return c.run()
+	}
+	if c.rv != nil {
+		switch {
+		case fresh:
+			c.openReview()
+		case fl.matter != "":
+			c.post(fl.matter)
+		default:
+			c.onQuiet()
+		}
+		<-c.rv.done
+		if c.rv.err != nil {
+			return c.rv.err
+		}
+		fmt.Println(c.rv.url)
+		return nil
 	}
 	if _, err := c.f.Post(fl.matter); err != nil {
 		return err
@@ -247,8 +302,8 @@ func loadConfig(path string) (config, error) {
 
 // openSession reopens the session in dir with its own roster, or starts one
 // there from the named roster, reading the repository the council was
-// started in.
-func openSession(dir string, cfg config, name string) (session, error) {
+// started in; with info, the session reviews that pull request.
+func openSession(dir string, cfg config, name string, info *pr.Info, dry bool) (session, error) {
 	path := filepath.Join(dir, "session.json")
 	var s session
 	if b, err := os.ReadFile(path); err == nil {
@@ -266,14 +321,18 @@ func openSession(dir string, cfg config, name string) (session, error) {
 	if !ok {
 		return s, fmt.Errorf("no roster %q in the config", name)
 	}
-	s = session{Created: time.Now().Format("2006-01-02"), Roster: roster, Systems: map[string]string{}}
+	s = session{Created: time.Now().Format("2006-01-02"), Roster: roster, Systems: map[string]string{}, PR: info, DryRun: dry && info != nil}
 	if cwd, err := os.Getwd(); err == nil {
 		if repo := tools.Find(cwd); repo != nil {
 			s.Root, s.Repo = repo.Root, repo.Name
 		}
 	}
+	review := ""
+	if info != nil {
+		review = reviewCharter(*info)
+	}
 	for _, spec := range roster {
-		s.Systems[spec.Seat] = floor.Charter(spec, roster, cfg.Words, s.Created, s.Repo)
+		s.Systems[spec.Seat] = floor.Charter(spec, roster, cfg.Words, s.Created, s.Repo, review)
 	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -345,6 +404,7 @@ type console struct {
 	folding  string     // the seat writing the report, if any
 	foldFrom int        // the seq of the fold request
 	reported string     // the path of the last report
+	rv       *review    // the pull request a review session posts on, or nil
 }
 
 func (c *console) transcript() string { return filepath.Join(c.dir, "transcript.md") }
@@ -404,7 +464,8 @@ func (c *console) onEntry(e floor.Entry) {
 		fmt.Fprintln(os.Stderr, "transcript:", err)
 	}
 	folded, failed := "", false
-	if c.folding != "" && e.From == c.folding && e.Seen >= c.foldFrom {
+	fold := c.folding != "" && e.From == c.folding && e.Seen >= c.foldFrom
+	if fold {
 		c.folding = ""
 		failed = e.Kind != "msg"
 		if !failed {
@@ -415,6 +476,9 @@ func (c *console) onEntry(e floor.Entry) {
 				c.reported, folded = path, path
 			}
 		}
+	}
+	if c.rv != nil {
+		c.reviewEntry(e, fold, failed)
 	}
 	if c.quiet {
 		return
@@ -437,14 +501,30 @@ func (c *console) onEntry(e floor.Entry) {
 	}
 }
 
-// fold asks a seat, by its ID or name, to fold the debate into report.md.
+// fold asks a seat, by its ID or name, to fold the debate into report.md; in
+// a review session, into the review.
 func (c *console) fold(seat string) error {
 	s := c.f.Seat(seat)
 	if s == nil {
 		return fmt.Errorf("no seat %s", seat)
 	}
-	e, err := c.f.Post("@" + s.Label() + " " + foldPrompt)
+	prompt := foldPrompt
+	c.mu.Lock()
+	if c.rv != nil {
+		if c.rv.stage == posting {
+			c.mu.Unlock()
+			return errors.New("the review is being posted")
+		}
+		prompt, c.rv.stage, c.rv.held = reviewFoldPrompt, folding, false
+	}
+	c.mu.Unlock()
+	e, err := c.f.Post("@" + s.Label() + " " + prompt)
 	if err != nil {
+		c.mu.Lock()
+		if c.rv != nil {
+			c.rv.stage = debating
+		}
+		c.mu.Unlock()
 		return err
 	}
 	c.mu.Lock()
@@ -463,6 +543,15 @@ func (c *console) run() error {
 		reading = "reading " + c.sess.Repo + ": what git tracks at " + c.sess.Root
 	}
 	c.say(fmt.Sprintf("session %s\nseats: %s\n%s\n/help for commands", c.dir, strings.Join(members, ", "), reading))
+	var done <-chan struct{}
+	if c.rv != nil {
+		where := "posting on " + c.rv.info.URL
+		if c.sess.DryRun {
+			where = "a dry run: the posts go to " + filepath.Join(c.dir, "github")
+		}
+		c.say(fmt.Sprintf("reviewing pull request #%d at %s, %s; %s folds once the floor goes quiet", c.rv.info.Number, short(c.rv.info.HeadOid), where, c.label(c.rv.foldBy)))
+		done = c.rv.done
+	}
 
 	interrupts := make(chan os.Signal, 1)
 	signal.Notify(interrupts, os.Interrupt)
@@ -471,17 +560,38 @@ func (c *console) run() error {
 			if !c.f.Busy() {
 				os.Exit(130)
 			}
+			c.hold()
 			c.f.Stop()
 			c.say("stopped: the round in flight leaves no trace")
 		}
 	}()
+	if c.rv != nil {
+		c.openReview()
+	}
 
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 1<<20), 16<<20)
+	lines := make(chan string)
+	go func() {
+		defer close(lines)
+		for in.Scan() {
+			lines <- in.Text()
+		}
+	}()
 	var block []string
 	inBlock := false
-	for in.Scan() {
-		line := in.Text()
+	for {
+		var line string
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				return c.end(in)
+			}
+			line = l
+		case <-done:
+			c.say(c.cost())
+			return nil
+		}
 		if strings.TrimSpace(line) == `"""` {
 			if inBlock {
 				c.post(strings.Join(block, "\n"))
@@ -505,11 +615,25 @@ func (c *console) run() error {
 			c.post(line)
 		}
 	}
+}
+
+// end finishes once the chair's input ends: a review session waits for its
+// review, unless the chair holds the fold.
+func (c *console) end(in *bufio.Scanner) error {
+	c.mu.Lock()
+	wait := c.rv != nil && !c.rv.held
+	c.mu.Unlock()
+	if wait {
+		<-c.rv.done
+		c.say(c.cost())
+		return c.rv.err
+	}
 	c.f.Wait()
 	return in.Err()
 }
 
 func (c *console) post(text string) {
+	c.release()
 	if _, err := c.f.Post(text); err != nil {
 		c.say("error: " + err.Error())
 	}
@@ -521,11 +645,14 @@ func (c *console) command(line string) bool {
 	arg = strings.TrimSpace(arg)
 	switch cmd {
 	case "/quit":
+		c.hold()
 		c.f.Stop()
 		return false
 	case "/more":
+		c.release()
 		c.f.More()
 	case "/stop":
+		c.hold()
 		c.f.Stop()
 	case "/wait":
 		c.f.Wait()
@@ -554,7 +681,9 @@ func (c *console) command(line string) bool {
 		c.view(arg)
 	case "/fold":
 		seat := arg
-		if seat == "" {
+		if seat == "" && c.rv != nil {
+			seat = c.rv.foldBy
+		} else if seat == "" {
 			seat = c.f.Seats[0].ID
 		}
 		if err := c.fold(seat); err != nil {

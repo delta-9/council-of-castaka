@@ -37,8 +37,9 @@ func label(s minds.Spec) string {
 
 // Charter returns a seat's system prompt. A session stores it once per seat
 // and reuses it when resumed, so the prompt never changes under replayed
-// turns. repo is the repository the minds can read, if any.
-func Charter(seat minds.Spec, roster []minds.Spec, words int, date, repo string) string {
+// turns. repo is the repository the minds can read, if any; review is the
+// paragraph of a pull request review session, if any.
+func Charter(seat minds.Spec, roster []minds.Spec, words int, date, repo, review string) string {
 	members := make([]string, len(roster))
 	for i, s := range roster {
 		members[i] = fmt.Sprintf("%s (%s, %s)", label(s), s.Model, minds.Lab(s.Provider))
@@ -53,6 +54,9 @@ func Charter(seat minds.Spec, roster []minds.Spec, words int, date, repo string)
 		tools = "\n\n" + read + toolRules
 	case search:
 		tools = "\n\nYou can search the web for fresh facts." + toolRules
+	}
+	if review != "" {
+		tools += "\n\n" + review
 	}
 	prompt := strings.NewReplacer(
 		"{seat}", label(seat),

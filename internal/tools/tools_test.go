@@ -56,11 +56,11 @@ func TestReadOnly(t *testing.T) {
 	repo := testRepo(t)
 	ctx := context.Background()
 
-	if out, err := repo.ReadFile(ctx, "main.go", 2, 0); err != nil || !strings.Contains(out, "2\t// line two") {
+	if out, err := repo.ReadFile(ctx, "main.go", 2, 0, ""); err != nil || !strings.Contains(out, "2\t// line two") {
 		t.Errorf("reading a tracked file: %q, %v", out, err)
 	}
 	for _, path := range []string{".env.local", "ignored.txt", "link.txt", "../secret.txt", filepath.Join(repo.Root, "..", "x")} {
-		if out, err := repo.ReadFile(ctx, path, 1, 0); err == nil || strings.Contains(out, "secret") {
+		if out, err := repo.ReadFile(ctx, path, 1, 0, ""); err == nil || strings.Contains(out, "secret") {
 			t.Errorf("read_file %s should be refused, got %q", path, out)
 		}
 	}
@@ -91,6 +91,34 @@ func TestReadOnly(t *testing.T) {
 	}
 	if out, err := repo.Git(ctx, []string{"log", "--oneline"}); err != nil || !strings.Contains(out, "first commit") {
 		t.Errorf("git log: %q, %v", out, err)
+	}
+}
+
+// TestReadFileAtRev checks that a review reads a file as a commit has it,
+// with that commit's line numbers, whatever the working tree holds, and still
+// reads nothing git does not track as a file.
+func TestReadFileAtRev(t *testing.T) {
+	repo := testRepo(t)
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(repo.Root, "main.go"), []byte("changed in the working tree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := repo.ReadFile(ctx, "main.go", 2, 0, "HEAD"); err != nil || !strings.Contains(out, "2\t// line two") {
+		t.Errorf("main.go at HEAD: %q, %v", out, err)
+	}
+	for _, c := range []struct{ path, rev string }{
+		{"main.go", "--output=x"},
+		{".env.local", "HEAD"},
+		{"link.txt", "HEAD"},
+		{"missing.go", "HEAD"},
+		{"main.go", "no-such-rev"},
+	} {
+		if out, err := repo.ReadFile(ctx, c.path, 1, 0, c.rev); err == nil || strings.Contains(out, "secret") {
+			t.Errorf("read_file %s at %s should be refused, got %q", c.path, c.rev, out)
+		}
+	}
+	if repo.Remote != "origin" {
+		t.Errorf("Find gave the remote %q, want origin", repo.Remote)
 	}
 }
 

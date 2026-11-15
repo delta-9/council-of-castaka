@@ -75,6 +75,30 @@ func TestMentionByName(t *testing.T) {
 	}
 }
 
+// TestQuietAfterRounds checks that the floor reports when its rounds end, once
+// per stretch of rounds, after it is free for new ones: a review session folds
+// on that signal, and its fold must be able to start a round.
+func TestQuietAfterRounds(t *testing.T) {
+	log, err := OpenLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	var turns atomic.Int32
+	f := New(log, []*Seat{NewSeat("opus", "m", "", listening{turns: &turns})}, 2)
+	quiet := make(chan bool, 4)
+	f.OnQuiet = func() { quiet <- f.Busy() }
+	if _, err := f.Post("hello"); err != nil {
+		t.Fatal(err)
+	}
+	if busy := <-quiet; busy {
+		t.Fatal("the floor reported quiet while still busy")
+	}
+	if len(quiet) != 0 || turns.Load() != 1 {
+		t.Fatalf("%d more quiet reports and %d turns, want none and one", len(quiet), turns.Load())
+	}
+}
+
 // blocking waits until the chair stops the round.
 type blocking struct{ started chan struct{} }
 
