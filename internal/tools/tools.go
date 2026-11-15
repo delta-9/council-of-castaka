@@ -25,11 +25,12 @@ const (
 
 // Repo is a GitHub repository the minds can read: what git tracks, nothing else.
 type Repo struct {
-	Root string // the repository's top level
-	Name string // owner/name of its GitHub remote
+	Root   string // the repository's top level
+	Name   string // owner/name of its GitHub remote
+	Remote string // that remote's name in the repository
 }
 
-var githubRemote = regexp.MustCompile(`github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s`)
+var githubRemote = regexp.MustCompile(`(?m)^(\S+)\s+\S*github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s`)
 
 // Find returns the GitHub repository that contains dir, or nil when dir is
 // not inside a git repository with a GitHub remote.
@@ -47,7 +48,7 @@ func Find(dir string) *Repo {
 	if m == nil {
 		return nil
 	}
-	return &Repo{Root: top, Name: m[1]}
+	return &Repo{Root: top, Name: m[2], Remote: m[1]}
 }
 
 // gitCommands are the read-only subcommands the git tool runs.
@@ -95,23 +96,19 @@ func (r *Repo) Git(ctx context.Context, args []string) (string, error) {
 	return git(ctx, r.Root, args...)
 }
 
-// ReadFile returns lines of a file git tracks, numbered from start.
-func (r *Repo) ReadFile(ctx context.Context, path string, start, lines int) (string, error) {
+// ReadFile returns lines of a file git tracks, numbered from start: as the
+// working tree has it, or as the commit rev has it.
+func (r *Repo) ReadFile(ctx context.Context, path string, start, lines int, rev string) (string, error) {
 	rel, err := r.relative(path)
 	if err != nil {
 		return "", err
 	}
-	if _, err := git(ctx, r.Root, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel); err != nil {
-		return "", fmt.Errorf("%s is not tracked by git; only tracked files are readable", rel)
+	var data []byte
+	if rev != "" {
+		data, err = r.blob(ctx, rev, rel)
+	} else {
+		data, err = r.tracked(ctx, rel)
 	}
-	real, err := filepath.EvalSymlinks(filepath.Join(r.Root, rel))
-	if err != nil {
-		return "", err
-	}
-	if !r.inside(real) {
-		return "", fmt.Errorf("%s points outside the repository", rel)
-	}
-	data, err := os.ReadFile(real)
 	if err != nil {
 		return "", err
 	}
@@ -134,6 +131,52 @@ func (r *Repo) ReadFile(ctx context.Context, path string, start, lines int) (str
 		fmt.Fprintf(&b, "[lines %d-%d of %d; read on with start=%d]\n", start, last, len(all), last+1)
 	}
 	return b.String(), nil
+}
+
+// tracked reads a file of the working tree that git tracks, refusing a
+// symlink that leads out of the repository.
+func (r *Repo) tracked(ctx context.Context, rel string) ([]byte, error) {
+	if _, err := git(ctx, r.Root, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel); err != nil {
+		return nil, fmt.Errorf("%s is not tracked by git; only tracked files are readable", rel)
+	}
+	real, err := filepath.EvalSymlinks(filepath.Join(r.Root, rel))
+	if err != nil {
+		return nil, err
+	}
+	if !r.inside(real) {
+		return nil, fmt.Errorf("%s points outside the repository", rel)
+	}
+	return os.ReadFile(real)
+}
+
+// blobLimit bounds a file read at a commit.
+const blobLimit = 8 << 20
+
+// blob reads a regular file as the commit rev has it: a symlink or a
+// submodule there is refused.
+func (r *Repo) blob(ctx context.Context, rev, rel string) ([]byte, error) {
+	if strings.HasPrefix(rev, "-") {
+		return nil, fmt.Errorf("%s is not a revision", rev)
+	}
+	out, err := git(ctx, r.Root, "--literal-pathspecs", "ls-tree", rev, "--", rel)
+	if err != nil {
+		return nil, fmt.Errorf("no commit %s in the repository", rev)
+	}
+	meta, name, _ := strings.Cut(strings.TrimSpace(out), "\t")
+	fields := strings.Fields(meta)
+	if name != rel || len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755") {
+		return nil, fmt.Errorf("%s is not a file at %s", rel, rev)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	data, err := exec.CommandContext(ctx, "git", "-C", r.Root, "cat-file", "blob", fields[2]).Output()
+	if err != nil {
+		return nil, fmt.Errorf("git cat-file: %v", err)
+	}
+	if len(data) > blobLimit {
+		return nil, fmt.Errorf("%s at %s is over %d MB", rel, rev, blobLimit>>20)
+	}
+	return data, nil
 }
 
 // relative turns path into a clean path under the root, or refuses it.
@@ -215,12 +258,17 @@ func contains(list []string, s string) bool {
 type Kit struct {
 	Repo   *Repo // nil: no repository tools
 	Search *MCP  // nil: no MCP web search
+	// Rev gives read_file a rev parameter, for a review session. Other
+	// sessions keep the tool as it was: Fable's history check compares the
+	// tool list, so a resumed session must see the same one.
+	Rev bool
 }
 
 type input struct {
 	Path  string   `json:"path"`
 	Start float64  `json:"start"`
 	Lines float64  `json:"lines"`
+	Rev   string   `json:"rev"`
 	Args  []string `json:"args"`
 	Query string   `json:"query"`
 }
@@ -229,17 +277,22 @@ type input struct {
 func (k Kit) Tools() []minds.Tool {
 	var list []minds.Tool
 	if k.Repo != nil {
-		list = append(list,
-			minds.Tool{
-				Name:        "read_file",
-				Description: "Read a file of the repository " + k.Repo.Name + " that git tracks, with line numbers. Untracked and ignored files are not readable.",
-				Properties: map[string]any{
-					"path":  map[string]any{"type": "string", "description": "Path from the repository root"},
-					"start": map[string]any{"type": "integer", "description": "First line to read (default 1)"},
-					"lines": map[string]any{"type": "integer", "description": "How many lines (default 400, at most 2000)"},
-				},
-				Required: []string{"path"},
+		read := minds.Tool{
+			Name:        "read_file",
+			Description: "Read a file of the repository " + k.Repo.Name + " that git tracks, with line numbers. Untracked and ignored files are not readable.",
+			Properties: map[string]any{
+				"path":  map[string]any{"type": "string", "description": "Path from the repository root"},
+				"start": map[string]any{"type": "integer", "description": "First line to read (default 1)"},
+				"lines": map[string]any{"type": "integer", "description": "How many lines (default 400, at most 2000)"},
 			},
+			Required: []string{"path"},
+		}
+		if k.Rev {
+			read.Description += " With rev, the file as that commit has it, with that commit's line numbers."
+			read.Properties["rev"] = map[string]any{"type": "string", "description": "A commit to read the file at, instead of the working tree"}
+		}
+		list = append(list,
+			read,
 			minds.Tool{
 				Name: "git",
 				Description: "Run a read-only git command in the repository " + k.Repo.Name + ": " + strings.Join(gitCommands, ", ") +
@@ -269,7 +322,11 @@ func (k Kit) Run(ctx context.Context, name string, raw json.RawMessage) (string,
 	}
 	switch {
 	case name == "read_file" && k.Repo != nil:
-		return k.Repo.ReadFile(ctx, in.Path, int(in.Start), int(in.Lines))
+		rev := ""
+		if k.Rev {
+			rev = in.Rev
+		}
+		return k.Repo.ReadFile(ctx, in.Path, int(in.Start), int(in.Lines), rev)
 	case name == "git" && k.Repo != nil:
 		return k.Repo.Git(ctx, in.Args)
 	case name == "web_search" && k.Search != nil:
@@ -284,10 +341,14 @@ func (k Kit) Describe(name string, raw json.RawMessage) string {
 	_ = json.Unmarshal(raw, &in)
 	switch name {
 	case "read_file":
-		if in.Start > 1 {
-			return fmt.Sprintf("read %s:%d", in.Path, int(in.Start))
+		path := in.Path
+		if in.Rev != "" {
+			path += "@" + in.Rev[:min(len(in.Rev), 7)]
 		}
-		return "read " + in.Path
+		if in.Start > 1 {
+			return fmt.Sprintf("read %s:%d", path, int(in.Start))
+		}
+		return "read " + path
 	case "git":
 		return "git " + strings.Join(in.Args, " ")
 	case "web_search":
