@@ -92,6 +92,8 @@ type Spec struct {
 	// that thinks long at high effort (Carbon) needs more, since its thinking
 	// and its answer share the budget.
 	MaxTokens int64 `json:"maxTokens,omitempty"`
+	// Off keeps the seat out of the sessions started from its roster.
+	Off bool `json:"off,omitempty"`
 }
 
 // NativeSearch reports whether the seat searches with its provider's own tool.

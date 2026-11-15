@@ -296,6 +296,8 @@ func (c *console) queueReview(e floor.Entry) {
 			if !c.quiet {
 				c.warn(rv.err.Error())
 			}
+		case c.out != nil:
+			c.emit(event{Type: "review", URL: rv.url, Text: fmt.Sprintf("%d inline comments", len(inline))})
 		case !c.quiet:
 			c.say(c.color("1", fmt.Sprintf("review posted, %d inline comments: %s", len(inline), rv.url)))
 		}
@@ -333,8 +335,13 @@ func fit(s string) string {
 	return s[:cut] + "\n\n[cut at 65,000 characters; the whole text is in the session folder]"
 }
 
-// warn reports a failed post: in red on the console, on stderr with -q.
+// warn reports a failed post: in red on the console, on stderr with -q, as
+// an error event in the events modes.
 func (c *console) warn(s string) {
+	if c.out != nil {
+		c.emit(event{Type: "error", Text: s})
+		return
+	}
 	if c.quiet {
 		fmt.Fprintln(os.Stderr, "council:", s)
 		return
