@@ -68,14 +68,14 @@ What follows from this design:
 
 | Seat | Name | Model ID | Effort | Search | Key (env name) | $ per 1M tokens, in / out | Notes |
 |---|---|---|---|---|---|---|---|
-| opus | Morkaï | `claude-opus-5-5` | high | its own | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it |
-| fable | Noren | `claude-fable-5-2` | high | MiniMax | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention) |
+| opus | Morkaï | `claude-opus-5-5` | max | its own | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it; `maxTokens` 64000, Anthropic's starting point at max effort, since thinking shares it |
+| fable | Noren | `claude-fable-5-2` | max | MiniMax | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention); `maxTokens` 64000 |
 | hydrogen | Ewandor | `gemini-4-hydrogen` | high (its default) | its own | `GEMINI_API_KEY` | 1.50 / 7.50, cache 0.075 | Google's "fast" Gemini 4; levels low to xhigh |
 | carbon | Hûrl | `gemini-4-carbon` | high | its own | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium; `maxTokens` 32768, since at high effort it thought past 16K |
-| astra | Firfïn | `gpt-6-astra` | high | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | |
+| astra | Firfïn | `gpt-6-astra` | max | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | `maxTokens` 32768: its requests are not streamed, so a higher cap would only mean longer silent requests |
 | grok | | later | | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
 
-Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `name`, `provider`, `model`, `effort`, `search`, `card`, `maxTokens` in `council.json`), so two Opus seats with different cards would work.
+Opus, Fable and Astra run at max effort since 2026-11-15, the chair's call; each API accepted it in a one-word check. Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `name`, `provider`, `model`, `effort`, `search`, `card`, `maxTokens` in `council.json`), so two Opus seats with different cards would work.
 
 The minds and the console call each seat by its name; the log keeps the seat ID. A session freezes its roster and charters, so a session started before the names keeps the IDs.
 
