@@ -176,10 +176,10 @@ Running each mind through its own agent CLI (Claude Code, Codex, a Gemini CLI) i
   - Thinking is always on. `Thinking` stays unset and `OutputConfig.Effort` sets the depth. Sampling parameters and prefill return 400.
   - Each request is streamed and built back into the `BetaMessage` the tool loop expects:
     - A stream that ends without `message_stop` fails the step, so a cut turn is never stored. Reading stops at `message_stop`, so what the connection does afterwards cannot fail a finished answer.
-    - A watchdog at the transport fails a request after 120 s without a byte, headers and pings included. It cancels a context of its own, never the chair's. The longest silence measured on a high-effort turn is 30 s (rehearsal 4), and each turn logs its own as `quietMs`.
+    - A watchdog at the transport fails a request after 120 s without a byte, headers and pings included. It cancels a context of its own, never the chair's. The longest silence measured on a healthy high-effort turn is 30 s (rehearsal 4), and each turn logs its own as `quietMs`, a gap that a failure ended included.
     - Bounds: 15 minutes per request, its retries included, and 30 per turn, tool calls included. The client has no request timeout, which would cut long healthy streams.
-    - HTTP/2 health checks ping a connection silent for 45 s and close it after 15 s without an answer, so a dead connection leaves the pool within a minute.
-    - The SDK retries a request that got no response or a retryable status, twice. A stream the API fails partway with `overloaded_error` or `api_error` runs once more in place, 2 s later, and the console says so: that costs less than the next round rerunning every step of the turn, searches included. The chair chose this after rehearsal 4, over no retry and over Fable's retry only for steps that ran no search. Any other failure, or a second one, fails the turn, and the next round reruns it.
+    - HTTP/2 health checks ping a connection silent for 45 s and close it after 15 s without an answer, so a dead connection leaves the pool within a minute. On 2026-11-15 one caught Opus's connection dying mid-turn while Fable's, to the same API, streamed on: the turn failed with `http2: client connection lost` and spoke only a round later.
+    - The SDK retries a request that got no response or a retryable status, twice. A step whose stream fails partway runs once more in place, 2 s later, and the console says so: when the API sends `overloaded_error` or `api_error`, or when the stream, once started, loses its connection, stalls or ends before `message_stop`. That costs less than the next round rerunning every step of the turn, searches included. The chair chose it for the API errors after rehearsal 4, over no retry and over Fable's retry only for steps that ran no search, and for broken streams after that lost connection. Any other failure, or a second one, fails the turn, and the next round reruns it.
     - Usage counts once per request, failed ones included: input from `message_start`, output and billed searches from the last `message_delta`.
   - `maxTokens` is 16000. Top-level `CacheControl` caches the prefix.
   - A turn's exchange is replayed message by message with `param.Override`; each response becomes its message through `BetaMessage.ToParam()`, thinking blocks and signatures included. After a mid-output fallback, the reasoning blocks before the last fallback block are left out, as the fallback rules require.
@@ -275,7 +275,7 @@ Tests, each catching one regression:
 - `view_test.go`: a mind missing a message or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
 - `tools_test.go`: a mind reading something git does not track, or a tool writing a file.
 - `floor_test.go`: a failed turn dropping its cost from `/cost` or losing its queue, a cancelled turn leaving an entry, a mention by name reaching the wrong seat.
-- `anthropic_test.go`, on SSE scripts served from an `httptest` server: a cut or stalled stream stored as a turn, a finished answer failed after `message_stop`, slow headers stalling the body, a streamed turn replayed differently from a buffered one, a fallback turn priced as the model that declined, a transient mid-stream error not retried once in place or any other failure retried, lost usage or searches, a tool call reported before its input arrived.
+- `anthropic_test.go`, on SSE scripts served from an `httptest` server: a cut or stalled stream stored as a turn, a finished answer failed after `message_stop`, slow headers stalling the body, a streamed turn replayed differently from a buffered one, a fallback turn priced as the model that declined, a step that failed partway not retried once, or a rejected request, a stop or a time limit retried, lost usage or searches, a tool call reported before its input arrived.
 
 ## Phases
 
@@ -288,7 +288,7 @@ Tests, each catching one regression:
 ## Open
 
 - Should `/stop` keep the cost of the turns it cancels? Today they leave no trace.
-- Not run yet: the HTTP/2 health check (the fake API speaks HTTP/1.1), and the empty-reply nudge against a provider.
+- Not run yet: the empty-reply nudge against a provider, and the retry of a broken stream against the real API.
 
 ## Later, only if v1 earns it
 

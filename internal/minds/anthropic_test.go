@@ -20,7 +20,7 @@ import (
 )
 
 // frame is one step of a fake stream: a pause, then an SSE event. A frame
-// without an event is a silence.
+// without an event is a silence; the event cut drops the connection.
 type frame struct {
 	wait  time.Duration
 	event string
@@ -51,6 +51,12 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.(http.Flusher).Flush()
 	for _, fr := range script {
 		if !pause(r.Context(), fr.wait) {
+			return
+		}
+		if fr.event == "cut" {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
 			return
 		}
 		if fr.event != "" {
@@ -335,10 +341,11 @@ func TestFallbackServesTheTurn(t *testing.T) {
 	}
 }
 
-// TestStreamFailures checks each way a stream fails: an error that says why,
-// never a stored turn, with the request's input usage still counted. A cut or
-// stalled stream is not retried, only a request that got no response, and a
-// stall notes its silence.
+// TestStreamFailures checks each way a stream fails for good: an error that
+// says why, never a stored turn, every request's input usage counted, and the
+// silence before the failure noted. A stream that broke after it started got
+// its one retry, a request that got no response the SDK's two, and a time
+// limit none.
 func TestStreamFailures(t *testing.T) {
 	slowTool := append(pings(2, 200*time.Millisecond), toolCall()...)
 	cases := []struct {
@@ -346,18 +353,23 @@ func TestStreamFailures(t *testing.T) {
 		api      *fakeAPI
 		limits   limits
 		want     error
-		usage    bool // whether a message_start arrived, so input usage is known
-		requests int  // the requests the turn made; 0 where the tool loop makes it vary
+		usage    bool          // whether a message_start arrived, so input usage is known
+		requests int           // the requests the turn made; 0 where the tool loop makes it vary
+		quiet    time.Duration // the silence the turn must report at least
 	}{
-		{"cut before message_stop", &fakeAPI{scripts: [][]frame{half}}, quick, errTruncated, true, 1},
-		{"silent after the headers", &fakeAPI{scripts: [][]frame{append(half, frame{wait: 3 * time.Second})}}, quick, errStalled, true, 1},
+		{"cut before message_stop", &fakeAPI{scripts: [][]frame{half}}, quick, errTruncated, true, 2, 0},
+		// A dropped connection, as the HTTP/2 health check drops a dead one:
+		// the silence before it counts, though the watchdog did not end it.
+		{"connection lost after a silence", &fakeAPI{scripts: [][]frame{append(half, frame{wait: 200 * time.Millisecond, event: "cut"})}},
+			quick, io.ErrUnexpectedEOF, true, 2, 200 * time.Millisecond},
+		{"silent after the headers", &fakeAPI{scripts: [][]frame{append(half, frame{wait: 3 * time.Second})}}, quick, errStalled, true, 2, quick.idle},
 		// The SDK retries a request that got no response twice: a fresh
 		// connection may answer where a dead one did not.
-		{"silent before the headers", &fakeAPI{scripts: [][]frame{answer("late")}, headerDelay: 3 * time.Second}, quick, errStalled, false, 3},
+		{"silent before the headers", &fakeAPI{scripts: [][]frame{answer("late")}, headerDelay: 3 * time.Second}, quick, errStalled, false, 3, quick.idle},
 		{"past the step limit", &fakeAPI{scripts: [][]frame{append(half, pings(60, 100*time.Millisecond)...)}},
-			limits{idle: 300 * time.Millisecond, step: time.Second, turn: 15 * time.Second}, errStepTimeout, true, 1},
+			limits{idle: 300 * time.Millisecond, step: time.Second, turn: 15 * time.Second}, errStepTimeout, true, 1, 0},
 		{"past the turn limit", &fakeAPI{scripts: [][]frame{slowTool}},
-			limits{idle: time.Second, step: 5 * time.Second, turn: time.Second}, errTurnTimeout, true, 0},
+			limits{idle: time.Second, step: 5 * time.Second, turn: time.Second}, errTurnTimeout, true, 0, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -371,8 +383,8 @@ func TestStreamFailures(t *testing.T) {
 			if c.requests > 0 && c.api.count() != c.requests {
 				t.Errorf("%d requests, want %d", c.api.count(), c.requests)
 			}
-			if c.want == errStalled && reply.Quiet < c.limits.idle {
-				t.Errorf("longest silence %s, want at least the %s the stall waited", reply.Quiet, c.limits.idle)
+			if reply.Quiet < c.quiet {
+				t.Errorf("longest silence %s, want at least the %s before the failure", reply.Quiet, c.quiet)
 			}
 		})
 	}
@@ -396,13 +408,14 @@ func streamError(kind, message string) []frame {
 	return append(half, ev("error", fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q}}`, kind, message)))
 }
 
-// TestTransientStreamErrorRetriesOnce checks that a stream the API fails
-// partway while overloaded or erring is retried once, in place: the same
-// request again, the failed one's usage still counted and its partial output
-// never stored. A second failure, or any other error, fails the turn, and the
-// next round reruns it.
-func TestTransientStreamErrorRetriesOnce(t *testing.T) {
+// TestPartwayFailureRetriesOnce checks that a step whose stream fails partway,
+// the API overloaded or erring, or the connection lost, stalled or cut short,
+// is retried once, in place: the same request again, the failed one's usage
+// still counted and its partial output never stored. A second failure, or a
+// request the API rejects, fails the turn, and the next round reruns it.
+func TestPartwayFailureRetriesOnce(t *testing.T) {
 	overloaded := streamError("overloaded_error", "Overloaded")
+	dropped := append(half, frame{event: "cut"})
 	cases := []struct {
 		name     string
 		scripts  [][]frame
@@ -411,7 +424,11 @@ func TestTransientStreamErrorRetriesOnce(t *testing.T) {
 	}{
 		{"overloaded, then an answer", [][]frame{overloaded, answer("ok")}, true, 2},
 		{"an API error, then an answer", [][]frame{streamError("api_error", "Internal server error"), answer("ok")}, true, 2},
+		{"a lost connection, then an answer", [][]frame{dropped, answer("ok")}, true, 2},
+		{"a stall, then an answer", [][]frame{append(half, frame{wait: 3 * time.Second}), answer("ok")}, true, 2},
+		{"a stream cut short, then an answer", [][]frame{half, answer("ok")}, true, 2},
 		{"overloaded twice", [][]frame{overloaded}, false, 2},
+		{"a lost connection twice", [][]frame{dropped}, false, 2},
 		{"an invalid request", [][]frame{streamError("invalid_request_error", "Invalid request"), answer("ok")}, false, 1},
 	}
 	for _, c := range cases {
@@ -435,14 +452,14 @@ func TestTransientStreamErrorRetriesOnce(t *testing.T) {
 }
 
 // TestChairStopCancelsTheStream checks that the chair's stop ends the turn as
-// a cancellation, not a stall, so the floor drops it.
+// a cancellation, not a stall, so the floor drops it, and is never retried.
 func TestChairStopCancelsTheStream(t *testing.T) {
 	api := &fakeAPI{scripts: [][]frame{append(half, pings(50, 100*time.Millisecond)...)}}
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(300*time.Millisecond, cancel)
 	_, err := speak(testMind(t, api, quick), ctx)
-	if !errors.Is(err, context.Canceled) || errors.Is(err, errStalled) {
-		t.Fatalf("err = %v, want a cancellation", err)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, errStalled) || api.count() != 1 {
+		t.Fatalf("err = %v after %d requests, want a cancellation after one", err, api.count())
 	}
 }
 
