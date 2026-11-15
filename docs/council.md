@@ -75,7 +75,7 @@ What follows from this design:
 | astra | Firfïn | `gpt-6-astra` | max | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | `maxTokens` 32768: its requests are not streamed, so a higher cap would only mean longer silent requests |
 | grok | | later | | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
 
-Opus and Astra run at max effort since 2026-11-15, and Fable at xhigh, the chair's calls; each API accepted its level in a one-word check. Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `name`, `provider`, `model`, `effort`, `search`, `card`, `maxTokens` in `council.json`), so two Opus seats with different cards would work.
+This is the chair's roster, kept in his `~/.council/council.json`. Opus and Astra run at max effort since 2026-11-15 and Fable at xhigh, the chair's calls; each API accepted its level in a one-word check. A new install starts from the built-in roster instead (`cmd/council/defaults.json`): every seat at high effort, its keys read under the usual names (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `MINIMAX_API_KEY`). Output budgets follow the effort: an Anthropic seat gets 16000 up to high and 64000 at xhigh and max; a Gemini or OpenAI seat gets 16000 up to medium and 32768 from high up. Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `name`, `provider`, `model`, `effort`, `search`, `card`, `maxTokens` in `council.json`), so two Opus seats with different cards would work.
 
 The minds and the console call each seat by its name; the log keeps the seat ID. A session freezes its roster and charters, so a session started before the names keeps the IDs.
 
@@ -109,6 +109,10 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 - `council [-q] --pr 123 [--dry-run]` reviews a pull request and posts the review on it (Pull request reviews, below).
 - `council -q -m "…" [-fold opus]` runs the rounds without a console and prints the transcript's path, or folds and prints the report's path. It can be called from Claude Code or by an agent.
 - `council -search "…"` runs one search through the MiniMax MCP server and prints what came back, with its size.
+- **Config:** the built-in one (`cmd/council/defaults.json`), then `~/.council/council.json`, then the file `-config` names. A later layer replaces the fields it sets, and maps such as rosters and prices merge by key.
+- **Keys** come from the environment, then `~/.council/keys.env`, then the config's `envFile`. `council keys` shows which are set and from where, never a value; `council keys set <provider>` saves one from standard input; `council keys import <file>` copies them from an env file; `council keys check` tries each with a call that costs nothing (one MiniMax search, in the plan).
+- **Roster:** `council options` lists the seats, priced models and efforts; `council roster` prints the default roster and `council roster set` saves one, checked: the five seats, a priced model of each seat's lab, an effort that lab takes, two seats on at least. A seat with `"off": true` sits out the sessions started from its roster.
+- **Events:** `--events` writes the console's output as JSON lines (session, round, call, retry, entry, cost, report, review, note, error, end). `--detached` reads the chair's lines from the session's `chair` pipe, writes the events to its `events.jsonl`, and marks the session with `running.json` while it runs, so a program can start it, leave and attach again. See [council-in-the-gui.md](council-in-the-gui.md).
 - A typed line is posted at once and queued into every mind's next turn, even mid-round. `"""` on a line of its own starts or ends a multi-line message.
 - Commands (a seat goes by its name or ID, case and accents aside):
   - `/more`: run one more round.
@@ -136,7 +140,7 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 
 ### Web search
 
-- Each seat searches either with its provider's own tool or through MiniMax's MCP server (`"search": "mcp"` in `council.json`): `uvx minimax-coding-plan-mcp`, with `MINIMAX_API_KEY` from the same env file. The server starts on the first search and stays up for the session.
+- Each seat searches either with its provider's own tool or through MiniMax's MCP server (`"search": "mcp"` in the config): `uvx minimax-coding-plan-mcp`, with `MINIMAX_API_KEY` from the same env file. The server starts on the first search and stays up for the session.
 - **What a search costs**, measured 2026-11-14:
 
   | Path | Results added to the mind's input | One search |
@@ -155,7 +159,7 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 ### A turn is a loop
 
 - The mind calls tools; the council runs the local ones and sends the results back until the mind answers. Searches the provider runs happen inside the request; Anthropic's `pause_turn` is resumed by resending. 40 requests is the hard limit.
-- **The tool budget** is 25 calls a turn (`maxCalls` in `council.json`):
+- **The tool budget** is 25 calls a turn (`maxCalls` in the config):
   - The result of the call that uses it up says so ("tools are off now: answer with what you have"), and the tool choice becomes `none`. Told nothing, Fable once announced a check it could no longer run and ended its turn empty.
   - A clean stop with no text gets one nudge request.
   - Calls that arrive together in one response are all answered, so a mind can pass the budget within that response: Carbon made 7 with a budget of 2.
@@ -289,21 +293,23 @@ Each turn rereads the transcript, and caching makes that cheap. So thinking, out
 - **Without tools,** at high effort and about 3.5K output tokens per turn, the estimate is about $0.55 per round of five seats, with Astra and Fable at roughly 70% of it.
 - **With tools,** a mind's context grows with everything it reads and stays cached for the session. Opus's native searches are the fastest-growing part.
 
-Trust `/cost`, which is computed from each turn's usage and the prices in `council.json`.
+Trust `/cost`, which is computed from each turn's usage and the prices in the config.
 
 ## Code shape
 
-Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 3,600 lines with comments, plus 1,160 lines of tests:
+Go, in the Castaka module: one more static binary next to the Metabarons, whose `internal/council` stays untouched. About 4,400 lines with comments, plus 1,730 lines of tests:
 - `internal/floor`: the log, `View`, rounds, the charter, the transcript.
 - `internal/minds`: one file per provider, each with its tool loop, plus a `fake` mind that echoes what it received and reads the last commit.
 - `internal/tools`: the repository tools behind the git guard, and the MCP client.
 - `internal/pr`: a pull request read with `gh`, the lines its diff takes inline comments on, and the comments and review posted on it.
-- `cmd/council`: flags, sessions, the console, `/fold`, `/cost`, and the review session (`review.go`).
-- `council.json`: the rosters, the key file and its variable names, the search server, the defaults and the prices. No secrets.
+- `cmd/council`: flags, sessions, the console, `/fold`, `/cost`, the review session (`review.go`), and the config, keys and roster commands (`config.go`) with the events modes (`detach_unix.go`).
+- `cmd/council/defaults.json`: the built-in config, embedded in the binary: the seats, rosters, key names, search server and prices. Nothing of one person's. The user's own settings live in `~/.council/council.json`.
 
 Tests, each catching one regression:
 - `view_test.go`: a mind missing a message or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
 - `tools_test.go`: a mind reading something git does not track, or a tool writing a file; a review reading the working tree instead of the head.
+- `config_test.go`: a built-in config holding someone's paths or an unpriced model, a layer that loses another's settings, a budget that ignores the effort, a roster the GUI saves with a council of one or another lab's model, a seat that is off still in the session, keys from the wrong source, written for others to read, or shown in a status.
+- `detached_test.go`, on the real binary with the fake mind: the chair's pipe not read, the events not written, no end event, or `running.json` left behind.
 - `pr_test.go`: an inline comment on a line GitHub refuses (it refuses the whole review), a comment lost from the review, a message posted twice or again after a resume, a refused review not sent again without its inline comments, a dry run that posts, a head commit left unfetched.
 - `floor_test.go`: a failed turn dropping its cost from `/cost` or losing its queue, a cancelled turn leaving an entry, a mention by name reaching the wrong seat, the end of the rounds never reported (a review would never fold), a recovered turn's retry missing from the log.
 - `anthropic_test.go`, on SSE scripts served from an `httptest` server: a cut or stalled stream stored as a turn, a finished answer failed after `message_stop`, slow headers stalling the body, a streamed turn replayed differently from a buffered one, a fallback turn priced as the model that declined, a step that failed partway not retried once (a break before `message_start` included), or a rejected request, an undecodable event, a stop or a time limit retried, a retry that reruns the turn instead of the step, a retry missing from the console or the turn, a failure's silence counted as healthy, lost usage or searches, a tool call reported before its input arrived.
@@ -316,6 +322,7 @@ Tests, each catching one regression:
 4. Tools, web search and `/fold`. Done; rehearsal 2.
 5. Streaming the Anthropic requests, tests first. Done, as rehearsals 2 and 3 designed it; rehearsal 4 reviewed it, and its findings are fixed.
 6. Pull request reviews (`--pr`), tests first. Done; rehearsal 5 dry, rehearsal 6 live on PR 3.
+7. The council in the rawpixel GUI, for colleagues with their own keys: [council-in-the-gui.md](council-in-the-gui.md). Phase 1, the council's side, is built.
 
 ## Open
 
