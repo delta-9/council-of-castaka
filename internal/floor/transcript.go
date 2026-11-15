@@ -33,6 +33,9 @@ func Transcript(title string, seats []*Seat, entries []Entry) string {
 				}
 				fmt.Fprintf(&b, "\n*%d %s: %s*\n", n, noun, strings.Join(e.Calls, " · "))
 			}
+			for _, r := range e.Retries {
+				fmt.Fprintf(&b, "\n*retried after %s*\n", r)
+			}
 			fmt.Fprintf(&b, "\n%s\n", e.Text)
 		case e.Kind == "pass":
 			fmt.Fprintf(&b, "\n*%s passes · round %d · #%d*\n", from, e.Round, e.Seq)
@@ -50,6 +53,11 @@ func Meta(e Entry) string {
 		parts = append(parts, "served by "+e.Served)
 	}
 	parts = append(parts, fmt.Sprintf("%.1fs", float64(e.Ms)/1000))
+	if n := len(e.Retries); n == 1 {
+		parts = append(parts, "1 retry")
+	} else if n > 1 {
+		parts = append(parts, fmt.Sprintf("%d retries", n))
+	}
 	if u := e.Usage; u != nil {
 		parts = append(parts, "in "+tokens(u.Input+u.CacheRead+u.CacheWrite))
 		if u.CacheRead > 0 {

@@ -28,10 +28,13 @@ type Entry struct {
 	Ms     int64        `json:"ms,omitempty"`
 	Usage  *minds.Usage `json:"usage,omitempty"`
 	Calls  []string     `json:"calls,omitempty"` // the tools the turn called, described
-	// QuietMs is the longest the connection stayed silent during the turn, on
-	// streamed requests: the figure the idle limit is calibrated on.
+	// QuietMs is the turn's longest silence that data or headers ended, on
+	// streamed requests: the figure the idle limit is calibrated on. CutMs is
+	// the longest that a failure ended: a stall, a lost connection.
 	QuietMs int64           `json:"quietMs,omitempty"`
-	Raw     json.RawMessage `json:"raw,omitempty"` // the native exchange, for replay
+	CutMs   int64           `json:"cutMs,omitempty"`
+	Retries []string        `json:"retries,omitempty"` // the steps run once more, with what failed
+	Raw     json.RawMessage `json:"raw,omitempty"`     // the native exchange, for replay
 }
 
 // Log is the session's append-only record. An entry is written to disk before

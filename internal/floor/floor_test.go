@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/delta-9/council-of-castaka/internal/minds"
 )
@@ -96,6 +97,35 @@ func TestQuietAfterRounds(t *testing.T) {
 	}
 	if len(quiet) != 0 || turns.Load() != 1 {
 		t.Fatalf("%d more quiet reports and %d turns, want none and one", len(quiet), turns.Load())
+	}
+}
+
+// retried answers after a retry, with silences of both kinds.
+type retried struct{}
+
+func (retried) Speak(ctx context.Context, system string, turns []minds.Turn) (minds.Reply, error) {
+	return minds.Reply{Text: "answered", Retries: []string{"a broken stream: http2: client connection lost"},
+		Quiet: 2 * time.Second, Cut: 60 * time.Second}, nil
+}
+
+// TestRetriesReachTheLog checks that a turn that recovered on a retry says so
+// in the log, and keeps the silence the failure ended apart from the healthy
+// one the idle limit is calibrated on.
+func TestRetriesReachTheLog(t *testing.T) {
+	log, err := OpenLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	f := New(log, []*Seat{NewSeat("opus", "m", "", retried{})}, 1)
+	if _, err := f.Post("hello"); err != nil {
+		t.Fatal(err)
+	}
+	f.Wait()
+	entries := log.Snapshot()
+	last := entries[len(entries)-1]
+	if last.Kind != "msg" || len(last.Retries) != 1 || last.QuietMs != 2000 || last.CutMs != 60000 {
+		t.Fatalf("entry %+v, want the answer with its retry, 2000 ms of healthy silence and 60000 cut", last)
 	}
 }
 

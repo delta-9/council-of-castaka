@@ -261,7 +261,8 @@ func (f *Floor) speak(ctx context.Context, s *Seat, entries []Entry, head, round
 	if ctx.Err() != nil {
 		return // stopped by the chair: the turn leaves no trace
 	}
-	e := Entry{From: s.ID, Seen: head, Round: round, Model: s.Model, Served: reply.Served, Ms: time.Since(start).Milliseconds(), Calls: reply.Calls, QuietMs: reply.Quiet.Milliseconds()}
+	e := Entry{From: s.ID, Seen: head, Round: round, Model: s.Model, Served: reply.Served, Ms: time.Since(start).Milliseconds(), Calls: reply.Calls,
+		QuietMs: reply.Quiet.Milliseconds(), CutMs: reply.Cut.Milliseconds(), Retries: reply.Retries}
 	switch {
 	case err != nil:
 		e.Kind, e.Text = "error", err.Error()

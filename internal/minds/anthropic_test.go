@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,10 +230,51 @@ var quick = limits{idle: 300 * time.Millisecond, step: 5 * time.Second, turn: 15
 
 func testMind(t *testing.T, api *fakeAPI, l limits) *anthropicMind {
 	t.Helper()
+	return newTestMind(t, api, l, stubTools{}, nil)
+}
+
+func newTestMind(t *testing.T, api *fakeAPI, l limits, tools Toolbox, notify func(string)) *anthropicMind {
+	t.Helper()
 	srv := httptest.NewServer(api)
 	t.Cleanup(srv.Close)
 	spec := Spec{Seat: "opus", Provider: "anthropic", Model: "claude-test", Effort: "low", Search: "off"}
-	return anthropicWith(spec, "test-key", Options{MaxTokens: 1000, Tools: stubTools{}}, l, option.WithBaseURL(srv.URL))
+	return anthropicWith(spec, "test-key", Options{MaxTokens: 1000, Tools: tools, Notify: notify}, l, option.WithBaseURL(srv.URL))
+}
+
+// notes records what a mind tells the console.
+type notes struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (n *notes) add(s string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.lines = append(n.lines, s)
+}
+
+// retries returns the retry notices.
+func (n *notes) retries() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var r []string
+	for _, l := range n.lines {
+		if strings.HasPrefix(l, "retrying after ") {
+			r = append(r, l)
+		}
+	}
+	return r
+}
+
+// countingTools counts the tools it runs.
+type countingTools struct {
+	stubTools
+	runs atomic.Int32
+}
+
+func (c *countingTools) Run(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	c.runs.Add(1)
+	return c.stubTools.Run(ctx, name, input)
 }
 
 func speak(m *anthropicMind, ctx context.Context) (Reply, error) {
@@ -343,9 +385,9 @@ func TestFallbackServesTheTurn(t *testing.T) {
 
 // TestStreamFailures checks each way a stream fails for good: an error that
 // says why, never a stored turn, every request's input usage counted, and the
-// silence before the failure noted. A stream that broke after it started got
-// its one retry, a request that got no response the SDK's two, and a time
-// limit none.
+// silence that the failure ended noted apart from healthy silence. A stream
+// that broke once its response arrived got its one retry, a request that got
+// no response the SDK's two, and a time limit none.
 func TestStreamFailures(t *testing.T) {
 	slowTool := append(pings(2, 200*time.Millisecond), toolCall()...)
 	cases := []struct {
@@ -355,13 +397,15 @@ func TestStreamFailures(t *testing.T) {
 		want     error
 		usage    bool          // whether a message_start arrived, so input usage is known
 		requests int           // the requests the turn made; 0 where the tool loop makes it vary
-		quiet    time.Duration // the silence the turn must report at least
+		cut      time.Duration // the silence a failure ended, at least
 	}{
 		{"cut before message_stop", &fakeAPI{scripts: [][]frame{half}}, quick, errTruncated, true, 2, 0},
 		// A dropped connection, as the HTTP/2 health check drops a dead one:
-		// the silence before it counts, though the watchdog did not end it.
-		{"connection lost after a silence", &fakeAPI{scripts: [][]frame{append(half, frame{wait: 200 * time.Millisecond, event: "cut"})}},
-			quick, io.ErrUnexpectedEOF, true, 2, 200 * time.Millisecond},
+		// the silence before it counts, though the watchdog did not end it. The
+		// idle limit is far above the silence, so scheduling delays cannot turn
+		// the drop into a stall.
+		{"connection lost after a silence", &fakeAPI{scripts: [][]frame{append(half, frame{wait: 250 * time.Millisecond, event: "cut"})}},
+			limits{idle: time.Second, step: 5 * time.Second, turn: 15 * time.Second, retry: 10 * time.Millisecond}, io.ErrUnexpectedEOF, true, 2, 200 * time.Millisecond},
 		{"silent after the headers", &fakeAPI{scripts: [][]frame{append(half, frame{wait: 3 * time.Second})}}, quick, errStalled, true, 2, quick.idle},
 		// The SDK retries a request that got no response twice: a fresh
 		// connection may answer where a dead one did not.
@@ -383,8 +427,11 @@ func TestStreamFailures(t *testing.T) {
 			if c.requests > 0 && c.api.count() != c.requests {
 				t.Errorf("%d requests, want %d", c.api.count(), c.requests)
 			}
-			if reply.Quiet < c.quiet {
-				t.Errorf("longest silence %s, want at least the %s before the failure", reply.Quiet, c.quiet)
+			if reply.Cut < c.cut {
+				t.Errorf("longest silence a failure ended %s, want at least %s", reply.Cut, c.cut)
+			}
+			if c.cut > 0 && reply.Quiet >= c.cut {
+				t.Errorf("healthy silence %s holds the failure's silence", reply.Quiet)
 			}
 		})
 	}
@@ -409,10 +456,13 @@ func streamError(kind, message string) []frame {
 }
 
 // TestPartwayFailureRetriesOnce checks that a step whose stream fails partway,
-// the API overloaded or erring, or the connection lost, stalled or cut short,
-// is retried once, in place: the same request again, the failed one's usage
-// still counted and its partial output never stored. A second failure, or a
-// request the API rejects, fails the turn, and the next round reruns it.
+// the API overloaded or erring, or the stream broken once its response
+// arrived, is retried once, in place: the same request again, the failed
+// one's usage still counted and its partial output never stored, the retry
+// told to the console and recorded with its reason, and the failure's silence
+// kept out of the healthy figure. A second failure, a request the API rejects,
+// or an event the SDK cannot decode fails the turn, and the next round reruns
+// it.
 func TestPartwayFailureRetriesOnce(t *testing.T) {
 	overloaded := streamError("overloaded_error", "Overloaded")
 	dropped := append(half, frame{event: "cut"})
@@ -421,31 +471,100 @@ func TestPartwayFailureRetriesOnce(t *testing.T) {
 		scripts  [][]frame
 		answers  bool
 		requests int
+		input    int64  // the input usage of the requests that reached message_start
+		why      string // the retry's reason; "" for no retry
 	}{
-		{"overloaded, then an answer", [][]frame{overloaded, answer("ok")}, true, 2},
-		{"an API error, then an answer", [][]frame{streamError("api_error", "Internal server error"), answer("ok")}, true, 2},
-		{"a lost connection, then an answer", [][]frame{dropped, answer("ok")}, true, 2},
-		{"a stall, then an answer", [][]frame{append(half, frame{wait: 3 * time.Second}), answer("ok")}, true, 2},
-		{"a stream cut short, then an answer", [][]frame{half, answer("ok")}, true, 2},
-		{"overloaded twice", [][]frame{overloaded}, false, 2},
-		{"a lost connection twice", [][]frame{dropped}, false, 2},
-		{"an invalid request", [][]frame{streamError("invalid_request_error", "Invalid request"), answer("ok")}, false, 1},
+		{"overloaded, then an answer", [][]frame{overloaded, answer("ok")}, true, 2, 20, "overloaded_error"},
+		{"an API error, then an answer", [][]frame{streamError("api_error", "Internal server error"), answer("ok")}, true, 2, 20, "api_error"},
+		{"a dropped connection, then an answer", [][]frame{dropped, answer("ok")}, true, 2, 20, "a broken stream"},
+		{"a stall, then an answer", [][]frame{append(half, frame{wait: 3 * time.Second}), answer("ok")}, true, 2, 20, "a stall"},
+		{"a stream cut short, then an answer", [][]frame{half, answer("ok")}, true, 2, 20, "a stream cut short"},
+		// Between the response headers and message_start, the SDK's retries
+		// are over: the step's retry is the only one.
+		{"a dropped connection before message_start, then an answer", [][]frame{{{event: "cut"}}, answer("ok")}, true, 2, 10, "a broken stream"},
+		{"a stall before message_start, twice", [][]frame{{{wait: 3 * time.Second}}}, false, 2, 0, "a stall"},
+		{"overloaded twice", [][]frame{overloaded}, false, 2, 20, "overloaded_error"},
+		{"a dropped connection twice", [][]frame{dropped}, false, 2, 20, "a broken stream"},
+		{"an invalid request", [][]frame{streamError("invalid_request_error", "Invalid request"), answer("ok")}, false, 1, 10, ""},
+		{"an event the SDK cannot decode", [][]frame{append(half, ev("content_block_delta", "{")), answer("ok")}, false, 1, 10, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			api := &fakeAPI{scripts: c.scripts}
-			reply, err := speak(testMind(t, api, quick), context.Background())
+			told := &notes{}
+			reply, err := speak(newTestMind(t, api, quick, stubTools{}, told.add), context.Background())
 			if (err == nil) != c.answers || api.count() != c.requests {
 				t.Fatalf("err %v after %d requests, want an answer %v after %d", err, api.count(), c.answers, c.requests)
 			}
 			if c.answers && (reply.Text != "ok" || strings.Contains(string(reply.Raw), `"half"`)) {
 				t.Errorf("reply %q, raw %s: want the retry's answer, without the failed step's text", reply.Text, reply.Raw)
 			}
-			if reply.Usage.Input != int64(10*c.requests) {
-				t.Errorf("usage %+v, want every request's input counted", reply.Usage)
+			if reply.Usage.Input != c.input {
+				t.Errorf("usage %+v, want an input of %d over the requests", reply.Usage, c.input)
 			}
 			if c.requests == 2 && api.request(1) != api.request(0) {
 				t.Errorf("the retry was not the same request:\n%s\n%s", api.request(0), api.request(1))
+			}
+			notices := told.retries()
+			switch {
+			case c.why == "" && (len(notices) > 0 || len(reply.Retries) > 0):
+				t.Errorf("no retry wanted, got notices %q and retries %q", notices, reply.Retries)
+			case c.why != "" && (len(notices) != 1 || !strings.HasPrefix(notices[0], "retrying after "+c.why+": ")):
+				t.Errorf("notices %q, want one retry after %s, with the error", notices, c.why)
+			case c.why != "" && (len(reply.Retries) != 1 || !strings.HasPrefix(reply.Retries[0], c.why+": ")):
+				t.Errorf("retries %q, want the one after %s recorded with its error", reply.Retries, c.why)
+			}
+			if c.answers && reply.Quiet >= quick.idle {
+				t.Errorf("healthy silence %s holds the failed try's silence", reply.Quiet)
+			}
+		})
+	}
+}
+
+// TestRetryRepeatsOnlyTheFailedStep checks that a stream that breaks after
+// the turn's first step reruns that step alone: the tool already answered is
+// not run again, the same request goes out, and the failed attempt's search,
+// which ran, stays in the calls. Its usage counts what arrived: cut after its
+// last message_delta, all of it; cut before, only what message_start gave.
+func TestRetryRepeatsOnlyTheFailedStep(t *testing.T) {
+	searching := []frame{start(10),
+		blockStart(0, `{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}`),
+		blockDelta(0, `{"type":"input_json_delta","partial_json":"{\"query\":\"go release\"}"}`),
+		blockStop(0),
+	}
+	billed := ev("message_delta", `{"type":"message_delta","delta":{"stop_reason":"pause_turn","stop_sequence":null},`+
+		`"usage":{"output_tokens":3,"server_tool_use":{"web_search_requests":1}}}`)
+	cases := []struct {
+		name             string
+		broken           []frame
+		output, searches int64
+	}{
+		{"cut after its last message_delta", append(slices.Clone(searching), billed, frame{event: "cut"}), 5 + 3 + 12, 1},
+		{"cut before its last message_delta", append(slices.Clone(searching), frame{event: "cut"}), 5 + 1 + 12, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			api := &fakeAPI{scripts: [][]frame{toolCall(), c.broken, answer("done")}}
+			tools := &countingTools{}
+			reply, err := speak(newTestMind(t, api, quick, tools, nil), context.Background())
+			if err != nil || reply.Text != "done" || api.count() != 3 {
+				t.Fatalf("reply %q, err %v after %d requests, want the answer after three", reply.Text, err, api.count())
+			}
+			if api.request(1) != api.request(2) || !strings.Contains(api.request(2), "commit abc") {
+				t.Errorf("the retry must resend the failed step, with the tool's result:\n%s\n%s", api.request(1), api.request(2))
+			}
+			if n := tools.runs.Load(); n != 1 {
+				t.Errorf("the tool ran %d times, want once: a retry repeats the step, not the turn", n)
+			}
+			if reply.Usage.Input != 30 || reply.Usage.Output != c.output || reply.Usage.Searches != c.searches {
+				t.Errorf("usage %+v, want 30 in, %d out and %d searches", reply.Usage, c.output, c.searches)
+			}
+			var exchange []json.RawMessage
+			if json.Unmarshal(reply.Raw, &exchange) != nil || len(exchange) != 3 || strings.Contains(string(reply.Raw), "srvtoolu_1") {
+				t.Errorf("the stored exchange must hold the tool call, its result and the answer, not the failed step: %s", reply.Raw)
+			}
+			if !slices.Contains(reply.Calls, `web_search {"query":"go release"}`) {
+				t.Errorf("calls %q: the failed attempt's search ran and must stay listed", reply.Calls)
 			}
 		})
 	}
