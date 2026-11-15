@@ -739,7 +739,7 @@ func (c *console) cost() string {
 		turns                          int
 		in, read, write, out, searches int64
 		usd                            float64
-		unpriced                       bool
+		unpriced, retried              bool
 	}
 	per := map[string]*sum{}
 	var order []string
@@ -757,6 +757,7 @@ func (c *console) cost() string {
 		s.turns++
 		s.in, s.read, s.write, s.out = s.in+u.Input, s.read+u.CacheRead, s.write+u.CacheWrite, s.out+u.Output
 		s.searches += u.Searches
+		s.retried = s.retried || len(e.Retries) > 0
 		p, ok := c.cfg.Prices[e.Served]
 		if !ok {
 			p, ok = c.cfg.Prices[e.Model]
@@ -781,10 +782,13 @@ func (c *console) cost() string {
 		if s.unpriced {
 			usd += "+"
 		}
+		if s.retried {
+			usd += "*"
+		}
 		fmt.Fprintf(&b, "%-10s %5d %9d %9d %9d %9d %8d %9s\n", c.label(id), s.turns, s.in, s.read, s.write, s.out, s.searches, usd)
 		total += s.usd
 	}
-	fmt.Fprintf(&b, "total est. $%.4f (prices from council.json; + marks turns with no price; MCP searches are in your MiniMax plan)", total)
+	fmt.Fprintf(&b, "total est. $%.4f (prices from council.json; + marks turns with no price; * marks a retried turn, whose broken try may have cost more than it reported; MCP searches are in your MiniMax plan)", total)
 	return b.String()
 }
 

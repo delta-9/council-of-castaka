@@ -48,9 +48,9 @@ func anthropicWith(spec Spec, key string, opt Options, l limits, extra ...option
 	// HTTP/2 health checks: a connection silent for 45 s gets a ping, and one
 	// that does not answer within 15 s is closed. A healthy stream is never
 	// that quiet (the longest silence measured is 30 s), and a dead connection
-	// fails its request and leaves the pool within a minute, so the SDK's
-	// retry dials a fresh one instead of stalling on the same connection
-	// until the watchdog.
+	// fails its request and leaves the pool within a minute, so a retry (the
+	// SDK's before the response, the step's after it) dials a fresh one
+	// instead of stalling on the same connection until the watchdog.
 	base.HTTP2 = &http.HTTP2Config{SendPingTimeout: 45 * time.Second, PingTimeout: 15 * time.Second}
 	transport := watchdog{base: base, idle: l.idle}
 	opts := append([]option.RequestOption{option.WithAPIKey(key), option.WithHTTPClient(&http.Client{Transport: transport})}, extra...)
@@ -107,9 +107,12 @@ func (m *anthropicMind) Speak(ctx context.Context, system string, turns []Turn) 
 		resp, err := m.step(ctx, params, &reply)
 		if why := retryable(err); why != "" {
 			// One more try of this step costs less than the next round
-			// rerunning every step of the turn, searches included.
+			// rerunning every step of the turn, searches included. The log
+			// keeps the retry with what failed, even when the retry succeeds.
+			retry := why + ": " + err.Error()
+			reply.Retries = append(reply.Retries, retry)
 			if m.opt.Notify != nil {
-				m.opt.Notify("retrying after " + why)
+				m.opt.Notify("retrying after " + retry)
 			}
 			if err = wait(ctx, m.limits.retry); err == nil {
 				resp, err = m.step(ctx, params, &reply)
@@ -171,6 +174,9 @@ func (m *anthropicMind) step(ctx context.Context, params anthropic.BetaMessageNe
 	quiet := &silence{}
 	stream := m.client.Beta.Messages.NewStreaming(context.WithValue(ctx, silenceKey{}, quiet), params)
 	defer stream.Close()
+	// NewStreaming returns once the response arrived, the SDK's retries done:
+	// from here, a broken stream is the step's to retry.
+	started := stream.Err() == nil
 	var msg anthropic.BetaMessage
 	var err error
 	stopped := false
@@ -197,7 +203,7 @@ func (m *anthropicMind) step(ctx context.Context, params anthropic.BetaMessageNe
 			err = errTruncated
 		}
 	}
-	reply.Quiet = max(reply.Quiet, quiet.max())
+	reply.Quiet, reply.Cut = max(reply.Quiet, quiet.max()), max(reply.Cut, quiet.maxCut())
 	if msg.ID != "" {
 		reply.Usage.add(Usage{
 			Input:      msg.Usage.InputTokens,
@@ -210,13 +216,14 @@ func (m *anthropicMind) step(ctx context.Context, params anthropic.BetaMessageNe
 	if err != nil {
 		// Say why: a time limit of the step or the turn rather than the error
 		// the cut read produced. A stop by the chair stays a cancellation.
-		if cause := context.Cause(ctx); cause == errStepTimeout || cause == errTurnTimeout || errors.Is(cause, context.Canceled) {
+		if cause := context.Cause(ctx); cause != nil {
 			return nil, cause
 		}
-		// A stream that started and then broke, rather than an error the API
-		// sent: Speak may run the step once more.
-		var apiErr *anthropic.Error
-		if msg.ID != "" && !errors.As(err, &apiErr) {
+		// A stream that broke once its response arrived: a read that failed,
+		// or a stream that ended too early. Speak may run the step once more.
+		// An event the SDK cannot decode or accumulate stays as it is.
+		var wire wireError
+		if started && (errors.As(err, &wire) || errors.Is(err, errTruncated)) {
 			err = cutError{err}
 		}
 		return nil, err
@@ -224,8 +231,8 @@ func (m *anthropicMind) step(ctx context.Context, params anthropic.BetaMessageNe
 	return &msg, nil
 }
 
-// cutError is a stream that started and then broke: its connection lost,
-// stalled or cut short.
+// cutError is a stream that broke once its response arrived: its connection
+// lost, stalled, or cut short.
 type cutError struct{ err error }
 
 func (e cutError) Error() string { return e.err.Error() }
@@ -233,9 +240,10 @@ func (e cutError) Unwrap() error { return e.err }
 
 // retryable says why a step failed partway when the step is worth running
 // once more, in place: the API overloaded or erring mid-stream, or a stream
-// that started and then broke. Anything else gives "": an error the API sends
-// for a bad request, the chair's stop, the time limits, and a failure before
-// the stream started, which the SDK has already retried.
+// that broke once its response arrived. Anything else gives "": an error the
+// API sends for a bad request, an event the SDK cannot decode, the chair's
+// stop, the time limits, and a failure before the response arrived, which the
+// SDK has already retried.
 func retryable(err error) string {
 	var apiErr *anthropic.Error
 	var cut cutError
@@ -251,7 +259,7 @@ func retryable(err error) string {
 		case errors.Is(err, errTruncated):
 			return "a stream cut short"
 		}
-		return "a lost connection"
+		return "a broken stream"
 	}
 	return ""
 }

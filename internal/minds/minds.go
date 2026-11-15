@@ -47,7 +47,10 @@ type Reply struct {
 	Stop   string // the provider's stop or finish reason
 	Usage  Usage
 	Calls  []string      // the tools called this turn, described for the chair
-	Quiet  time.Duration // the longest the connection stayed silent, on streamed requests
+	Quiet  time.Duration // on streamed requests, the longest silence that data or headers ended
+	Cut    time.Duration // on streamed requests, the longest silence that a failure ended
+	// Retries are the steps run once more in place, each with why and what failed.
+	Retries []string
 }
 
 // Mind speaks one turn, given its system prompt and its view of the floor. On
