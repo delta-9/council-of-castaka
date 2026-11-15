@@ -10,24 +10,34 @@ import (
 func Transcript(title string, seats []*Seat, entries []Entry) string {
 	var b strings.Builder
 	members := make([]string, len(seats))
+	names := map[string]string{}
 	for i, s := range seats {
-		members[i] = s.ID + " (" + s.Model + ")"
+		members[i] = s.Label() + " (" + s.Model + ")"
+		names[s.ID] = s.Label()
 	}
 	fmt.Fprintf(&b, "# %s\n\n*%s*\n\n---\n", title, strings.Join(members, " · "))
 	for _, e := range entries {
+		from := e.From
+		if name := names[e.From]; name != "" {
+			from = name
+		}
 		switch {
 		case e.Kind == "msg" && e.From == "chair":
 			fmt.Fprintf(&b, "\n**chair** · #%d\n\n> %s\n", e.Seq, strings.ReplaceAll(e.Text, "\n", "\n> "))
 		case e.Kind == "msg":
-			fmt.Fprintf(&b, "\n### %s · round %d · #%d\n\n*%s*\n", e.From, e.Round, e.Seq, Meta(e))
-			if len(e.Calls) > 0 {
-				fmt.Fprintf(&b, "\n*%d calls: %s*\n", len(e.Calls), strings.Join(e.Calls, " · "))
+			fmt.Fprintf(&b, "\n### %s · round %d · #%d\n\n*%s*\n", from, e.Round, e.Seq, Meta(e))
+			if n := len(e.Calls); n > 0 {
+				noun := "calls"
+				if n == 1 {
+					noun = "call"
+				}
+				fmt.Fprintf(&b, "\n*%d %s: %s*\n", n, noun, strings.Join(e.Calls, " · "))
 			}
 			fmt.Fprintf(&b, "\n%s\n", e.Text)
 		case e.Kind == "pass":
-			fmt.Fprintf(&b, "\n*%s passes · round %d · #%d*\n", e.From, e.Round, e.Seq)
+			fmt.Fprintf(&b, "\n*%s passes · round %d · #%d*\n", from, e.Round, e.Seq)
 		case e.Kind == "error":
-			fmt.Fprintf(&b, "\n> **%s** · round %d · #%d · error: %s\n", e.From, e.Round, e.Seq, strings.ReplaceAll(e.Text, "\n", " "))
+			fmt.Fprintf(&b, "\n> **%s** · round %d · #%d · error: %s\n", from, e.Round, e.Seq, strings.ReplaceAll(e.Text, "\n", " "))
 		}
 	}
 	return b.String()

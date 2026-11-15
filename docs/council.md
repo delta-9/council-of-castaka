@@ -60,29 +60,31 @@ What follows from this design:
 - A round snapshots the head of the log. Every active seat with a non-empty queue takes one turn, all in parallel, on that snapshot. Replies print and are appended as they land. The round ends when every turn has finished.
 - So round 1 is blind: first opinions are independent, and nobody anchors on whoever answers fastest. Castaka's first round is blind the same way.
 - A chair message sets the round budget to `rounds`. The default is 2: blind opinions, then one round of rebuttal. Then the floor waits for you. `/more` runs one more round. The message and its budget are applied under one lock, so a round sees both or neither.
-- `@opus @carbon …` in a chair message runs one round in which only those seats speak. The others still read all of it at their next turn.
+- `@Hûrl @Noren …` in a chair message runs one round in which only those seats speak. A mention takes a seat's name or ID, case and accents aside (`@hurl`). The others still read all of it at their next turn.
 - A reply of exactly `PASS` means nothing new. It is logged, shown to you dimmed and sent to no one. When no seat has anything queued, the floor waits.
 - Dropped for v1: free-running minds, each looping on its own queue. The fast models would talk several times more than the deliberate ones, and the replies would ping-pong and run up costs. If it comes back, only the scheduler changes; the log and the view stay as they are.
 
 ## The minds
 
-| Seat | Model ID | Effort | Search | Key (env name) | $ per 1M tokens, in / out | Notes |
-|---|---|---|---|---|---|---|
-| opus | `claude-opus-5-5` | high | its own | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it |
-| fable | `claude-fable-5-2` | high | MiniMax | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention) |
-| hydrogen | `gemini-4-hydrogen` | high (its default) | its own | `GEMINI_API_KEY` | 1.50 / 7.50, cache 0.075 | Google's "fast" Gemini 4; levels low to xhigh |
-| carbon | `gemini-4-carbon` | high | its own | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium; `maxTokens` 32768, since at high effort it thought past 16K |
-| astra | `gpt-6-astra` | high | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | |
-| grok | later | | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
+| Seat | Name | Model ID | Effort | Search | Key (env name) | $ per 1M tokens, in / out | Notes |
+|---|---|---|---|---|---|---|---|
+| opus | Morkaï | `claude-opus-5-5` | high | its own | `ANTHROPIC_ORG_API_KEY` | 4 / 20, cache read 0.20 | default effort is medium, so set it |
+| fable | Noren | `claude-fable-5-2` | high | MiniMax | `ANTHROPIC_ORG_API_KEY` | 8 / 40, cache read 0.20 | needs 30-day retention (400 under zero data retention) |
+| hydrogen | Ewandor | `gemini-4-hydrogen` | high (its default) | its own | `GEMINI_API_KEY` | 1.50 / 7.50, cache 0.075 | Google's "fast" Gemini 4; levels low to xhigh |
+| carbon | Hûrl | `gemini-4-carbon` | high | its own | `GEMINI_API_KEY` | 2 / 10 until 2026-11-30, then 4 / 20 | the "deliberate" flagship; default medium; `maxTokens` 32768, since at high effort it thought past 16K |
+| astra | Firfïn | `gpt-6-astra` | high | MiniMax | `OPENAI_CODE_API_KEY` | 10 / 50, cached 1 | |
+| grok | | later | | | `XAI_API_KEY` | | xAI's API is OpenAI-compatible, so it should be config only |
 
-Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `provider`, `model`, `effort`, `search`, `card` in `council.json`), so two Opus seats with different cards would work.
+Every ID is listed by its key's models endpoint (2026-11-14); limits and prices come from the providers' model and pricing pages. Every model has a 1M context window. Output caps are 128K for Claude and Astra, 64K for Hydrogen, and 32K for Carbon (from its API listing). Claude 5.x rejects sampling parameters, and reasoning models gain little from them, so the quirk comes from the minds themselves, plus an optional `card`. A seat is config (`seat`, `name`, `provider`, `model`, `effort`, `search`, `card`, `maxTokens` in `council.json`), so two Opus seats with different cards would work.
+
+The minds and the console call each seat by its name; the log keeps the seat ID. A session freezes its roster and charters, so a session started before the names keeps the IDs.
 
 ## Charter (system prompt, frozen per session)
 
-`floor/charter.go`:
+`floor/charter.go` (a seat without a name goes by its ID):
 
 ```
-You are {seat} ({model}) on a council: {roster: seat (model, lab), …}.
+You are {name} ({model}) on a council: {roster: name (model, lab), …}.
 The chair brings a technical problem and decides; the council argues it out.
 Messages since your last turn arrive as <msg from="name">…</msg>, oldest first.
 Today is {date}. {What the seat can read (the repository, through read_file and
@@ -107,17 +109,17 @@ files, commits or URLs; what you read stays private, so quote what matters.}
 - `council -q -m "…" [-fold opus]` runs the rounds without a console and prints the transcript's path, or folds and prints the report's path. It can be called from Claude Code or by an agent.
 - `council -search "…"` runs one search through the MiniMax MCP server and prints what came back, with its size.
 - A typed line is posted at once and queued into every mind's next turn, even mid-round. `"""` on a line of its own starts or ends a multi-line message.
-- Commands:
+- Commands (a seat goes by its name or ID, case and accents aside):
   - `/more`: run one more round.
   - `/stop`: cancel the round in flight (Ctrl-C does the same). Cancelled turns leave no trace.
   - `/rounds N`: set the round budget.
-  - `/seats`: list the seats. `/seat -carbon` and `/seat +carbon` take a seat out or put it back.
+  - `/seats`: list the seats, with names and IDs. `/seat -hurl` and `/seat +hurl` take a seat out or put it back.
   - `/attach <path>`: post a file (up to 256 KB) as a chair message.
   - `/view <seat>`: print exactly what that seat will receive next (the queue made visible).
   - `/fold [seat]`: that seat folds the debate into `report.md` (below).
   - `/wait`: hold the next line until the floor is quiet, so piped chair scripts run in order.
   - `/cost` and `/quit`.
-- Each round prints its speakers; each tool call prints as a dim line while the mind works (`opus · git log -n 5`, `fable · web search: …`); each message prints when it lands, with its round, time and tokens.
+- Each round prints its speakers; each tool call prints as a dim line while the mind works (`Morkaï · git log -n 5`, `Noren · web search: …`); each message prints when it lands, with its round, time and tokens.
 - On disk: `~/.council/sessions/<date-time>/` holds `log.jsonl`, `session.json`, `transcript.md` and `report.md`, all private to your user. The transcript is rewritten after each event and lists each turn's tool calls, so it can stay open in a Markdown viewer.
 
 ## Tools and web search
@@ -252,7 +254,7 @@ Go, in the Castaka module: one more static binary next to the Metabarons, whose 
 Tests, each catching one regression:
 - `view_test.go`: a mind missing a message or reading one twice. Tracking a seat's reads by its own last message instead of `seen` makes it fail.
 - `tools_test.go`: a mind reading something git does not track, or a tool writing a file.
-- `floor_test.go`: a failed turn dropping what its completed steps cost from `/cost`.
+- `floor_test.go`: a failed turn dropping what its completed steps cost from `/cost`, a mention by name reaching the wrong seat.
 
 ## Phases
 

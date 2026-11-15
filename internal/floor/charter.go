@@ -27,13 +27,21 @@ Today is {date}.{tools}
 const toolRules = " Check facts before you assert them, and cite the files, commits or URLs you rely on." +
 	" What you read stays private to you: quote what matters, since the others see only what you write."
 
+// label is what the minds call a seat: its name, or its ID when it has none.
+func label(s minds.Spec) string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.Seat
+}
+
 // Charter returns a seat's system prompt. A session stores it once per seat
 // and reuses it when resumed, so the prompt never changes under replayed
 // turns. repo is the repository the minds can read, if any.
 func Charter(seat minds.Spec, roster []minds.Spec, words int, date, repo string) string {
 	members := make([]string, len(roster))
 	for i, s := range roster {
-		members[i] = fmt.Sprintf("%s (%s, %s)", s.Seat, s.Model, minds.Lab(s.Provider))
+		members[i] = fmt.Sprintf("%s (%s, %s)", label(s), s.Model, minds.Lab(s.Provider))
 	}
 	read := "You can read the repository " + repo + " as the chair has it: read_file shows a file git tracks," +
 		" and git runs read-only commands (log, show, diff, blame, grep, ls-files…). Untracked and ignored files are out of reach."
@@ -47,7 +55,7 @@ func Charter(seat minds.Spec, roster []minds.Spec, words int, date, repo string)
 		tools = "\n\nYou can search the web for fresh facts." + toolRules
 	}
 	prompt := strings.NewReplacer(
-		"{seat}", seat.Seat,
+		"{seat}", label(seat),
 		"{model}", seat.Model,
 		"{roster}", strings.Join(members, ", "),
 		"{date}", date,

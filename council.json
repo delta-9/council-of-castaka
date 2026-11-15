@@ -19,18 +19,18 @@
   },
   "rosters": {
     "minds": [
-      {"seat": "opus", "provider": "anthropic", "model": "claude-opus-5-5", "effort": "high"},
-      {"seat": "fable", "provider": "anthropic", "model": "claude-fable-5-2", "effort": "high", "search": "mcp"},
-      {"seat": "hydrogen", "provider": "gemini", "model": "gemini-4-hydrogen", "effort": "high"},
-      {"seat": "carbon", "provider": "gemini", "model": "gemini-4-carbon", "effort": "high", "maxTokens": 32768},
-      {"seat": "astra", "provider": "openai", "model": "gpt-6-astra", "effort": "high", "search": "mcp"}
+      {"seat": "opus", "name": "Morkaï", "provider": "anthropic", "model": "claude-opus-5-5", "effort": "high"},
+      {"seat": "fable", "name": "Noren", "provider": "anthropic", "model": "claude-fable-5-2", "effort": "high", "search": "mcp"},
+      {"seat": "hydrogen", "name": "Ewandor", "provider": "gemini", "model": "gemini-4-hydrogen", "effort": "high"},
+      {"seat": "carbon", "name": "Hûrl", "provider": "gemini", "model": "gemini-4-carbon", "effort": "high", "maxTokens": 32768},
+      {"seat": "astra", "name": "Firfïn", "provider": "openai", "model": "gpt-6-astra", "effort": "high", "search": "mcp"}
     ],
     "rehearsal": [
-      {"seat": "opus", "provider": "anthropic", "model": "claude-opus-5-5", "effort": "medium"},
-      {"seat": "fable", "provider": "anthropic", "model": "claude-fable-5-2", "effort": "medium", "search": "mcp"},
-      {"seat": "hydrogen", "provider": "gemini", "model": "gemini-4-hydrogen", "effort": "low"},
-      {"seat": "carbon", "provider": "gemini", "model": "gemini-4-hydrogen", "effort": "low"},
-      {"seat": "astra", "provider": "openai", "model": "gpt-6-luna", "effort": "medium", "search": "mcp"}
+      {"seat": "opus", "name": "Morkaï", "provider": "anthropic", "model": "claude-opus-5-5", "effort": "medium"},
+      {"seat": "fable", "name": "Noren", "provider": "anthropic", "model": "claude-fable-5-2", "effort": "medium", "search": "mcp"},
+      {"seat": "hydrogen", "name": "Ewandor", "provider": "gemini", "model": "gemini-4-hydrogen", "effort": "low"},
+      {"seat": "carbon", "name": "Hûrl", "provider": "gemini", "model": "gemini-4-hydrogen", "effort": "low"},
+      {"seat": "astra", "name": "Firfïn", "provider": "openai", "model": "gpt-6-luna", "effort": "medium", "search": "mcp"}
     ]
   },
   "pricesAsOf": "2026-11-14; gemini-4-carbon becomes 4 / 20 / 0.20 on 2026-12-01; Gemini's first 5,000 searches a month are free",

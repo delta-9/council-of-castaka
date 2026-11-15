@@ -77,6 +77,7 @@ type Toolbox interface {
 // Spec is one seat of a roster in council.json.
 type Spec struct {
 	Seat     string `json:"seat"`
+	Name     string `json:"name,omitempty"` // what the minds and the chair call the seat
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Effort   string `json:"effort"`

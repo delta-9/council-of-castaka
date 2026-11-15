@@ -6,13 +6,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/delta-9/council-of-castaka/internal/minds"
 )
 
 // Seat is one mind on the floor.
 type Seat struct {
-	ID     string
+	ID     string // what the log records
+	Name   string // what the minds and the chair read; the ID when empty
 	Model  string
 	System string
 	Mind   minds.Mind
@@ -22,6 +26,26 @@ type Seat struct {
 // NewSeat returns a seat that speaks from the next round.
 func NewSeat(id, model, system string, mind minds.Mind) *Seat {
 	return &Seat{ID: id, Model: model, System: system, Mind: mind, active: true}
+}
+
+// Label is the seat's name, or its ID when it has none.
+func (s *Seat) Label() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.ID
+}
+
+// fold makes a name easy to type: lower case with the accents dropped, so
+// "Hûrl" and "hurl" are the same seat.
+func fold(s string) string {
+	var b strings.Builder
+	for _, r := range norm.NFD.String(s) {
+		if !unicode.Is(unicode.Mn, r) {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return b.String()
 }
 
 // Floor runs the rounds. In a round, every active seat with a non-empty queue
@@ -35,6 +59,8 @@ type Floor struct {
 	OnRound func(round int, seats []string)
 	OnEntry func(Entry)
 
+	names map[string]string // seat ID → name, for the views
+
 	mu      sync.Mutex
 	rounds  int // rounds granted to a chair message
 	budget  int
@@ -45,16 +71,24 @@ type Floor struct {
 	idle    chan struct{}
 }
 
-var mention = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
+var mention = regexp.MustCompile(`@([\p{L}\p{N}_-]+)`)
 
 // New returns a floor whose round numbers continue from the log.
 func New(log *Log, seats []*Seat, rounds int) *Floor {
-	f := &Floor{Log: log, Seats: seats, rounds: rounds}
+	f := &Floor{Log: log, Seats: seats, rounds: rounds, names: map[string]string{}}
+	for _, s := range seats {
+		if s.Name != "" {
+			f.names[s.ID] = s.Name
+		}
+	}
 	for _, e := range log.Snapshot() {
 		f.round = max(f.round, e.Round)
 	}
 	return f
 }
+
+// Names maps each named seat's ID to its name.
+func (f *Floor) Names() map[string]string { return f.names }
 
 // Post appends a chair message, grants the council its rounds and returns the
 // message as stored. A message that names seats with @ runs one round in which
@@ -62,8 +96,8 @@ func New(log *Log, seats []*Seat, rounds int) *Floor {
 func (f *Floor) Post(text string) (Entry, error) {
 	only := map[string]bool{}
 	for _, m := range mention.FindAllStringSubmatch(text, -1) {
-		if f.Seat(m[1]) != nil {
-			only[m[1]] = true
+		if s := f.Seat(m[1]); s != nil {
+			only[s.ID] = true
 		}
 	}
 	// Append and grant under the floor lock: a round's snapshot then sees the
@@ -126,10 +160,11 @@ func (f *Floor) Wait() {
 	}
 }
 
-// Seat returns the seat called id, or nil.
+// Seat returns the seat whose ID or name is id, case and accents aside, or nil.
 func (f *Floor) Seat(id string) *Seat {
+	want := fold(id)
 	for _, s := range f.Seats {
-		if s.ID == id {
+		if fold(s.ID) == want || (s.Name != "" && fold(s.Name) == want) {
 			return s
 		}
 	}
@@ -174,7 +209,7 @@ func (f *Floor) loop() {
 			if !s.active || (f.only != nil && !f.only[s.ID]) {
 				continue
 			}
-			if _, queue := View(entries, s.ID, head); len(queue) > 0 {
+			if _, queue := View(entries, s.ID, head, f.names); len(queue) > 0 {
 				speakers = append(speakers, s)
 			}
 		}
@@ -214,7 +249,7 @@ func (f *Floor) loop() {
 
 // speak runs one seat's turn on the round's snapshot and appends its reply.
 func (f *Floor) speak(ctx context.Context, s *Seat, entries []Entry, head, round int) {
-	turns, _ := View(entries, s.ID, head)
+	turns, _ := View(entries, s.ID, head, f.names)
 	start := time.Now()
 	reply, err := s.Mind.Speak(ctx, s.System, turns)
 	if ctx.Err() != nil {

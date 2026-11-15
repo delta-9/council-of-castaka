@@ -13,20 +13,22 @@ import (
 // messages it has still not read. A turn's Seen marks what it had read, so a
 // reply that landed before the seat's own in the same round still reaches it
 // next turn. Passes and errors are never delivered; an empty queue means the
-// seat has nothing to answer.
-func View(entries []Entry, seat string, head int) (turns []minds.Turn, queue []int) {
+// seat has nothing to answer. names gives the seats' names for the message
+// tags; a seat without one is tagged with its ID. The names come from the
+// session, which fixes them, so a replayed turn always renders the same.
+func View(entries []Entry, seat string, head int, names map[string]string) (turns []minds.Turn, queue []int) {
 	read := 0
 	for _, e := range entries {
 		if e.From != seat || (e.Kind != "msg" && e.Kind != "pass") {
 			continue
 		}
-		text, _ := batch(entries, seat, read, e.Seen)
+		text, _ := batch(entries, seat, read, e.Seen, names)
 		turns = append(turns,
 			minds.Turn{Role: "user", Text: text},
 			minds.Turn{Role: "assistant", Text: e.Text, Raw: e.Raw, Model: e.Model})
 		read = e.Seen
 	}
-	text, queue := batch(entries, seat, read, head)
+	text, queue := batch(entries, seat, read, head, names)
 	if len(queue) > 0 {
 		turns = append(turns, minds.Turn{Role: "user", Text: text})
 	}
@@ -34,7 +36,7 @@ func View(entries []Entry, seat string, head int) (turns []minds.Turn, queue []i
 }
 
 // batch renders the others' messages with lo < seq <= hi, oldest first.
-func batch(entries []Entry, seat string, lo, hi int) (string, []int) {
+func batch(entries []Entry, seat string, lo, hi int, names map[string]string) (string, []int) {
 	var b strings.Builder
 	var seqs []int
 	for _, e := range entries {
@@ -44,7 +46,11 @@ func batch(entries []Entry, seat string, lo, hi int) (string, []int) {
 		if len(seqs) > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "<msg from=\"%s\">\n%s\n</msg>", e.From, e.Text)
+		from := e.From
+		if name := names[e.From]; name != "" {
+			from = name
+		}
+		fmt.Fprintf(&b, "<msg from=\"%s\">\n%s\n</msg>", from, e.Text)
 		seqs = append(seqs, e.Seq)
 	}
 	if len(seqs) == 0 {

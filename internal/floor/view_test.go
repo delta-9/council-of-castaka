@@ -3,6 +3,7 @@ package floor
 import (
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -52,7 +53,7 @@ func TestView(t *testing.T) {
 		{"carbon", [][]int{{1, 2, 3, 4, 5, 6, 9, 10}}, []int{1, 2, 3, 4, 5, 6, 9, 10}},
 	}
 	for _, c := range cases {
-		turns, queue := View(entries, c.seat, 10)
+		turns, queue := View(entries, c.seat, 10, nil)
 		var got [][]int
 		for i, turn := range turns {
 			want := "user"
@@ -79,9 +80,12 @@ func TestView(t *testing.T) {
 			t.Errorf("%s: queue %v, want %v", c.seat, queue, c.queue)
 		}
 	}
-	turns, _ := View(entries, "opus", 10)
+	turns, _ := View(entries, "opus", 10, map[string]string{"astra": "Firfïn"})
 	if string(turns[3].Raw) != `{"native":true}` || turns[3].Model != "m" {
 		t.Errorf("opus's second turn lost its native reply: %+v", turns[3])
+	}
+	if !strings.Contains(turns[2].Text, `<msg from="Firfïn">`) || !strings.Contains(turns[2].Text, `<msg from="hydrogen">`) {
+		t.Errorf("a named seat is tagged by its name, the others by their ID: %s", turns[2].Text)
 	}
 }
 

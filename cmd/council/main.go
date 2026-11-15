@@ -82,6 +82,7 @@ const foldPrompt = "Fold the council's debate into the final report for the chai
 const help = `Type a line to post it; every mind reads it at its next turn.
 """            start or end a multi-line message
 @seat …        only the named seats speak in the next round
+               (a seat is its name or its id, case and accents aside: @hurl is Hûrl)
 /more          one more round
 /stop          cancel the round in flight
 /wait          hold the next line until the floor is quiet
@@ -188,13 +189,19 @@ func run(fl flags) error {
 		if spec.MaxTokens > 0 {
 			maxTokens = spec.MaxTokens
 		}
+		label := spec.Seat
+		if spec.Name != "" {
+			label = spec.Name
+		}
 		mind, err := minds.New(spec, key, minds.Options{
-			MaxTokens: maxTokens, MaxCalls: cfg.MaxCalls, Session: filepath.Base(dir), Tools: kit, Notify: c.notifier(spec.Seat),
+			MaxTokens: maxTokens, MaxCalls: cfg.MaxCalls, Session: filepath.Base(dir), Tools: kit, Notify: c.notifier(label),
 		})
 		if err != nil {
 			return err
 		}
-		seats = append(seats, floor.NewSeat(spec.Seat, spec.Model, sess.Systems[spec.Seat], mind))
+		seat := floor.NewSeat(spec.Seat, spec.Model, sess.Systems[spec.Seat], mind)
+		seat.Name = spec.Name
+		seats = append(seats, seat)
 	}
 	c.f = floor.New(log, seats, rounds)
 	c.f.OnRound, c.f.OnEntry = c.onRound, c.onEntry
@@ -370,11 +377,23 @@ func (c *console) notifier(seat string) func(string) {
 	}
 }
 
+// label is how the console names a seat: its name, or its ID.
+func (c *console) label(id string) string {
+	if s := c.f.Seat(id); s != nil {
+		return s.Label()
+	}
+	return id
+}
+
 func (c *console) onRound(round int, seats []string) {
 	if c.quiet {
 		return
 	}
-	c.say(c.color("2", fmt.Sprintf("── round %d · %s ──", round, strings.Join(seats, " "))))
+	labels := make([]string, len(seats))
+	for i, id := range seats {
+		labels[i] = c.label(id)
+	}
+	c.say(c.color("2", fmt.Sprintf("── round %d · %s ──", round, strings.Join(labels, " "))))
 }
 
 func (c *console) onEntry(e floor.Entry) {
@@ -400,15 +419,16 @@ func (c *console) onEntry(e floor.Entry) {
 	if c.quiet {
 		return
 	}
+	from := c.label(e.From)
 	switch {
 	case e.From == "chair":
 		fmt.Println(c.color("2", fmt.Sprintf("#%d chair: %s", e.Seq, firstLine(e.Text))))
 	case e.Kind == "msg":
-		fmt.Printf("\n%s\n%s\n\n", c.color("38;2;240;200;100", fmt.Sprintf("── %s · #%d · %s ──", e.From, e.Seq, floor.Meta(e))), e.Text)
+		fmt.Printf("\n%s\n%s\n\n", c.color("38;2;240;200;100", fmt.Sprintf("── %s · #%d · %s ──", from, e.Seq, floor.Meta(e))), e.Text)
 	case e.Kind == "pass":
-		fmt.Println(c.color("2", fmt.Sprintf("#%d %s passes · %s", e.Seq, e.From, floor.Meta(e))))
+		fmt.Println(c.color("2", fmt.Sprintf("#%d %s passes · %s", e.Seq, from, floor.Meta(e))))
 	default:
-		fmt.Println(c.color("31", fmt.Sprintf("#%d %s: error: %s", e.Seq, e.From, e.Text)))
+		fmt.Println(c.color("31", fmt.Sprintf("#%d %s: error: %s", e.Seq, from, e.Text)))
 	}
 	if folded != "" {
 		fmt.Println(c.color("1", "report: "+folded))
@@ -417,17 +437,18 @@ func (c *console) onEntry(e floor.Entry) {
 	}
 }
 
-// fold asks a seat to fold the debate into report.md.
+// fold asks a seat, by its ID or name, to fold the debate into report.md.
 func (c *console) fold(seat string) error {
-	if c.f.Seat(seat) == nil {
+	s := c.f.Seat(seat)
+	if s == nil {
 		return fmt.Errorf("no seat %s", seat)
 	}
-	e, err := c.f.Post("@" + seat + " " + foldPrompt)
+	e, err := c.f.Post("@" + s.Label() + " " + foldPrompt)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
-	c.folding, c.foldFrom = seat, e.Seq
+	c.folding, c.foldFrom = s.ID, e.Seq
 	c.mu.Unlock()
 	return nil
 }
@@ -435,7 +456,7 @@ func (c *console) fold(seat string) error {
 func (c *console) run() error {
 	members := make([]string, len(c.f.Seats))
 	for i, s := range c.f.Seats {
-		members[i] = s.ID + " (" + s.Model + ")"
+		members[i] = s.Label() + " (" + s.Model + ")"
 	}
 	reading := "no GitHub repository here: the minds read no files"
 	if c.sess.Repo != "" {
@@ -521,7 +542,7 @@ func (c *console) command(line string) bool {
 			if !c.f.Active(s) {
 				state = "off"
 			}
-			c.say(fmt.Sprintf("%-10s %-20s %s", s.ID, s.Model, state))
+			c.say(fmt.Sprintf("%-10s %-10s %-20s %s", s.Label(), s.ID, s.Model, state))
 		}
 	case "/seat":
 		if len(arg) < 2 || (arg[0] != '+' && arg[0] != '-') || !c.f.SetActive(arg[1:], arg[0] == '+') {
@@ -564,22 +585,23 @@ func (c *console) attach(path string) {
 
 // view prints exactly what a seat receives next: the queue made visible.
 func (c *console) view(id string) {
-	if c.f.Seat(id) == nil {
+	s := c.f.Seat(id)
+	if s == nil {
 		c.say("no seat " + id)
 		return
 	}
 	entries := c.f.Log.Snapshot()
-	turns, queue := floor.View(entries, id, len(entries))
+	turns, queue := floor.View(entries, s.ID, len(entries), c.f.Names())
 	if len(queue) == 0 {
-		c.say(fmt.Sprintf("%s: nothing queued, after %d turns of history", id, len(turns)))
+		c.say(fmt.Sprintf("%s: nothing queued, after %d turns of history", s.Label(), len(turns)))
 		return
 	}
 	from := make([]string, len(queue))
 	for i, seq := range queue {
-		from[i] = fmt.Sprintf("#%d %s", seq, entries[seq-1].From)
+		from[i] = fmt.Sprintf("#%d %s", seq, c.label(entries[seq-1].From))
 	}
 	c.say(fmt.Sprintf("%s receives next, after %d turns of history: %s\n\n%s",
-		id, len(turns)-1, strings.Join(from, ", "), turns[len(turns)-1].Text))
+		s.Label(), len(turns)-1, strings.Join(from, ", "), turns[len(turns)-1].Text))
 }
 
 // cost sums each seat's usage and prices it with council.json.
@@ -630,7 +652,7 @@ func (c *console) cost() string {
 		if s.unpriced {
 			usd += "+"
 		}
-		fmt.Fprintf(&b, "%-10s %5d %9d %9d %9d %9d %8d %9s\n", id, s.turns, s.in, s.read, s.write, s.out, s.searches, usd)
+		fmt.Fprintf(&b, "%-10s %5d %9d %9d %9d %9d %8d %9s\n", c.label(id), s.turns, s.in, s.read, s.write, s.out, s.searches, usd)
 		total += s.usd
 	}
 	fmt.Fprintf(&b, "total est. $%.4f (prices from council.json; + marks turns with no price; MCP searches are in your MiniMax plan)", total)
